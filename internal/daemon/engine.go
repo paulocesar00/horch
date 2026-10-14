@@ -272,12 +272,7 @@ func (e *Engine) setStatusLocked(pane, status string) {
 			d, _ = e.st.ObserveStatus(d.ID, status)
 		}
 		e.evaluateLocked(d)
-	} else if w, err := e.st.GetWorker(pane); err == nil && w.State == store.WorkerLive {
-		switch status {
-		case "idle", "done":
-			// A worker just became free: ready tasks may be waiting for it.
-			e.autoDispatchLocked(w.RunID)
-		}
+
 	}
 	e.notify.broadcast()
 }
@@ -377,7 +372,7 @@ func (e *Engine) evaluateLocked(d store.Dispatch) {
 			fmt.Sprintf("worker %s idle on task %s without reporting", d.PaneID, d.TaskID), body, d.TaskID, "")
 		return
 	}
-	if !d.SawWorking && d.DoneMessageID == "" && !d.UnobservedEscalated && now-max(d.StartedAt, d.MonitorAfter) >= e.cfg.UnobservedAfter.Milliseconds() {
+	if !d.SawWorking && d.DoneMessageID == "" && !d.UnobservedEscalated && now-d.StartedAt >= e.cfg.UnobservedAfter.Milliseconds() {
 		_ = e.st.MarkUnobservedEscalated(d.ID)
 		e.escalateLocked(d.RunID, fmt.Sprintf("dispatch %s: no activity observed", d.ID),
 			fmt.Sprintf("Dispatch %s (task %s) to %s has shown no activity for %s. The prompt may not have landed; check with `horch worker read --worker %s` before re-sending.", d.ID, d.TaskID, d.PaneID, e.cfg.UnobservedAfter, d.PaneID), d.TaskID)
@@ -443,7 +438,6 @@ func (e *Engine) afterSettleLocked(st store.Settlement) {
 	}
 	e.badgeTask(d.PaneID, "")
 	e.recomputeWatch()
-	e.autoDispatchLocked(d.RunID)
 	e.notify.broadcast()
 }
 

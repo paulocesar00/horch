@@ -20,7 +20,8 @@ blocked, and unobserved dispatch timers and notifies the coordinator.
 
 Runs group tasks and workers and identify a coordinator. Tasks have specifications,
 dependencies, attempt counts, and results. Only tasks whose dependencies completed
-become ready. Dispatches claim a task and a pane before submitting the prompt,
+become ready. The coordinator explicitly dispatches tasks; settlement never starts
+another dispatch. Dispatches claim a task and a pane before submitting the prompt,
 then record observed activity and the worker's completion report. Failed attempts
 are limited by the run's circuit breaker; explicit infrastructure failures refund
 the attempt. A task finishing does not end its worker's conversation.
@@ -47,3 +48,6 @@ uncertain submissions are escalated rather than resent automatically. See
 
 The plugin exposes only daemon startup and CLI installation. `horch --help` and
 `horch guide` describe the supported commands.
+
+Only the herdr plugin launches the daemon. A CLI with an unavailable socket
+returns `daemon_not_running` instead of executing a daemon from an agent pane.

@@ -5,7 +5,6 @@ import (
 )
 
 type Dispatch struct {
-	MonitorAfter        int64  `json:"monitor_after,omitempty"`
 	ID                  string `json:"id"`
 	TaskID              string `json:"task_id"`
 	RunID               string `json:"run_id"`
@@ -33,11 +32,11 @@ func (d Dispatch) Active() bool {
 	return d.Status == DispatchPending || d.Status == DispatchDispatched
 }
 
-const dispCols = `id,task_id,run_id,pane_id,COALESCE(agent,''),COALESCE(prompt_hash,''),status,saw_working,COALESCE(done_message_id,''),COALESCE(done_outcome,''),COALESCE(idle_since,0),unobserved_escalated,idle_escalated,nudges,started_at,COALESCE(settled_at,0),COALESCE(outcome,''),monitor_after,COALESCE(account,''),COALESCE(profile,''),COALESCE(model,'')`
+const dispCols = `id,task_id,run_id,pane_id,COALESCE(agent,''),COALESCE(prompt_hash,''),status,saw_working,COALESCE(done_message_id,''),COALESCE(done_outcome,''),COALESCE(idle_since,0),unobserved_escalated,idle_escalated,nudges,started_at,COALESCE(settled_at,0),COALESCE(outcome,''),COALESCE(account,''),COALESCE(profile,''),COALESCE(model,'')`
 
 func scanDisp(r interface{ Scan(...any) error }) (Dispatch, error) {
 	var d Dispatch
-	err := r.Scan(&d.ID, &d.TaskID, &d.RunID, &d.PaneID, &d.Agent, &d.PromptHash, &d.Status, &d.SawWorking, &d.DoneMessageID, &d.DoneOutcome, &d.IdleSince, &d.UnobservedEscalated, &d.IdleEscalated, &d.Nudges, &d.StartedAt, &d.SettledAt, &d.Outcome, &d.MonitorAfter, &d.Account, &d.Profile, &d.Model)
+	err := r.Scan(&d.ID, &d.TaskID, &d.RunID, &d.PaneID, &d.Agent, &d.PromptHash, &d.Status, &d.SawWorking, &d.DoneMessageID, &d.DoneOutcome, &d.IdleSince, &d.UnobservedEscalated, &d.IdleEscalated, &d.Nudges, &d.StartedAt, &d.SettledAt, &d.Outcome, &d.Account, &d.Profile, &d.Model)
 	return d, err
 }
 

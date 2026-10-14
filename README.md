@@ -41,8 +41,8 @@ horch dispatch --task t2 --to reviewer
 The task prompt includes the exact `horch done` invocation, pinned to the session
 and worker identity. The coordinator receives completion and escalation messages.
 A finished task does not spawn, restart, stop, release, or replace an agent.
-Optional `run update --auto on` and `dispatch next` assign ready tasks to idle
-registered workers in that run, oldest task first.
+`dispatch next` assigns ready tasks to idle registered workers in that run,
+oldest task first. Dispatch is explicit; task completion never dispatches more work.
 
 ## Worker
 
@@ -68,8 +68,9 @@ pickup timestamps. Keep one consuming `check --wait` per mailbox. Use
 `check --peek` followed by `ack --id mN` when acknowledgement must follow processing.
 A late completion report is stored without changing the closed dispatch.
 
-`daemon stop` stops only the daemon. The next client command starts it again;
-workers remain running. SQLite keeps task, report, and receipt history. Inspect
+`daemon stop` stops only the daemon. Restart it through the herdr plugin;
+the CLI never launches a daemon. Workers remain running. SQLite keeps task,
+report, and receipt history. Inspect
 the pane and inbox before retrying an operation whose result is unknown.
 Historical schema migrations are retained without dropping legacy tables.
 

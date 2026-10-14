@@ -25,9 +25,9 @@ Replace pane and task IDs with the actual IDs returned in your session.
 Use `run use R` to resume a run, `run current` to inspect the current binding,
 and `run list|show|update` to inspect or change run settings.
 `task list|show|update` manages tasks, dependencies, results, and retry budgets.
-`dispatch next` assigns ready tasks to idle registered workers; `run update --auto on`
-enables the same assignment automatically. Leave auto-dispatch off when the
-coordinator must choose which teammate handles each task.
+`dispatch next` explicitly assigns ready tasks to idle registered workers.
+Task completion never automatically dispatches more work. Use `dispatch --to NAME`
+when the coordinator must choose which teammate handles each task.
 
 Handle messages before dispatching more work:
 
@@ -73,8 +73,9 @@ input. Receipt evidence is distinct from a mailbox read.
 ## Inspection and restart
 
 `worker register|show|read|list` manages registration and inspection only.
-`status` reports daemon health; `daemon stop` stops only the daemon. The next
-command restarts it. Workers remain running and SQLite preserves tasks and mail.
+`status` reports daemon health; `daemon stop` stops only the daemon. Restart it
+through the herdr plugin. The CLI never launches a daemon from a worker pane.
+Workers remain running and SQLite preserves tasks and mail.
 Clients retry only safe operations after disconnect; uncertain dispatches are
 not automatically replayed.
 

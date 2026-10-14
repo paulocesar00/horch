@@ -123,7 +123,7 @@ func newHarness(t *testing.T) *harness {
 	return x
 }
 
-// drain runs queued async work (notifications, auto-dispatch) until none is left.
+// drain runs queued async work (notifications, explicit dispatch) until none is left.
 func (x *harness) drain() {
 	for {
 		x.qmu.Lock()
@@ -485,28 +485,28 @@ func TestDispatchRefusesBusyAgent(t *testing.T) {
 	}
 }
 
-func TestDAGAndAutoDispatch(t *testing.T) {
+func TestDAGAndExplicitDispatchNext(t *testing.T) {
 	// A → B and A → C share two persistent workers.
 	x := newHarness(t)
 	setupRun(x, "w1:p2", "w1:p3")
-	on := true
-	x.mustOp(coord, "run.update", RunUpdateArgs{AutoDispatch: &on}, nil)
 	var a, b, c store.Task
 	x.mustOp(coord, "task.create", TaskCreateArgs{Title: "A"}, &a)
 	x.mustOp(coord, "task.create", TaskCreateArgs{Title: "B", Deps: []string{a.ID}}, &b)
 	x.mustOp(coord, "task.create", TaskCreateArgs{Title: "C", Deps: []string{a.ID}}, &c)
+	x.mustOp(coord, "dispatch.next", RunRef{}, nil)
 	if x.task(a.ID).Status != store.TaskDispatched {
-		t.Fatalf("auto-dispatch should have sent A: %s", x.task(a.ID).Status)
+		t.Fatalf("explicit dispatch should have sent A: %s", x.task(a.ID).Status)
 	}
 	worker := x.task(a.ID).AssigneePaneID
 	x.status(worker, "working")
 	x.mustOp(worker, "send", SendArgs{Kind: store.KindDone, Body: "A ok"}, nil)
 	x.status(worker, "idle")
+	x.mustOp(coord, "dispatch.next", RunRef{}, nil)
 	if x.task(b.ID).Status != store.TaskDispatched {
-		t.Fatalf("B should auto-dispatch after A: %s", x.task(b.ID).Status)
+		t.Fatalf("B should explicit dispatch after A: %s", x.task(b.ID).Status)
 	}
 	if x.task(c.ID).Status != store.TaskDispatched {
-		t.Fatalf("C should auto-dispatch after A: %s", x.task(c.ID).Status)
+		t.Fatalf("C should explicit dispatch after A: %s", x.task(c.ID).Status)
 	}
 	for _, id := range []string{b.ID, c.ID} {
 		w := x.task(id).AssigneePaneID
@@ -592,23 +592,6 @@ func TestDispatchRetriesNamedAgentNotYetReady(t *testing.T) {
 	x.mustOp(coord, "dispatch", DispatchArgs{Task: task.ID, To: "w1:p2"}, &d)
 	if d.Outcome != "sent via agent.prompt (after 3 retries)" || len(x.h.typed["w1:p2"]) != 0 {
 		t.Fatalf("outcome %q typed=%v", d.Outcome, x.h.typed["w1:p2"])
-	}
-}
-
-func TestAutoDispatchWhenWorkerFreesUp(t *testing.T) {
-	x := newHarness(t)
-	setupRun(x, "w1:p2")
-	on := true
-	x.mustOp(coord, "run.update", RunUpdateArgs{AutoDispatch: &on}, nil)
-	x.status("w1:p2", "working") // busy with something else
-	var task store.Task
-	x.mustOp(coord, "task.create", TaskCreateArgs{Title: "A"}, &task)
-	if x.task(task.ID).Status != store.TaskReady {
-		t.Fatal("must not dispatch to a busy worker")
-	}
-	x.status("w1:p2", "idle")
-	if x.task(task.ID).Status != store.TaskDispatched {
-		t.Fatalf("worker went idle; task should auto-dispatch: %s", x.task(task.ID).Status)
 	}
 }
 

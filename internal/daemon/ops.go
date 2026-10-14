@@ -78,10 +78,9 @@ func (e *Engine) runFor(caller, run string) (store.Run, error) {
 // ---------- runs ----------
 
 type RunCreateArgs struct {
-	Title        string `json:"title"`
-	Coordinator  string `json:"coordinator,omitempty"`
-	AutoDispatch bool   `json:"auto_dispatch,omitempty"`
-	MaxAttempts  int    `json:"max_attempts,omitempty"`
+	Title       string `json:"title"`
+	Coordinator string `json:"coordinator,omitempty"`
+	MaxAttempts int    `json:"max_attempts,omitempty"`
 }
 
 func (e *Engine) opRunCreate(_ context.Context, caller string, raw json.RawMessage) (any, error) {
@@ -103,13 +102,10 @@ func (e *Engine) opRunCreate(_ context.Context, caller string, raw json.RawMessa
 		return nil, err
 	}
 	u := store.RunUpdate{}
-	if a.AutoDispatch {
-		u.AutoDispatch = &a.AutoDispatch
-	}
 	if a.MaxAttempts > 0 {
 		u.MaxAttempts = &a.MaxAttempts
 	}
-	if u.AutoDispatch != nil || u.MaxAttempts != nil {
+	if u.MaxAttempts != nil {
 		r, err = e.st.UpdateRun(r.ID, u)
 	}
 	e.notify.broadcast()
@@ -189,7 +185,6 @@ type RunUpdateArgs struct {
 	Run          string  `json:"run,omitempty"`
 	Status       *string `json:"status,omitempty"`
 	Coordinator  *string `json:"coordinator,omitempty"`
-	AutoDispatch *bool   `json:"auto_dispatch,omitempty"`
 	MaxAttempts  *int    `json:"max_attempts,omitempty"`
 	Title        *string `json:"title,omitempty"`
 	IdleReportMS *int64  `json:"idle_report_ms,omitempty"`
@@ -209,12 +204,9 @@ func (e *Engine) opRunUpdate(_ context.Context, caller string, raw json.RawMessa
 	if a.Coordinator != nil && *a.Coordinator == "me" {
 		*a.Coordinator = caller
 	}
-	r, err = e.st.UpdateRun(r.ID, store.RunUpdate{Status: a.Status, Coordinator: a.Coordinator, AutoDispatch: a.AutoDispatch, MaxAttempts: a.MaxAttempts, Title: a.Title, IdleReportMS: a.IdleReportMS})
+	r, err = e.st.UpdateRun(r.ID, store.RunUpdate{Status: a.Status, Coordinator: a.Coordinator, MaxAttempts: a.MaxAttempts, Title: a.Title, IdleReportMS: a.IdleReportMS})
 	if err != nil {
 		return nil, err
-	}
-	if a.AutoDispatch != nil && *a.AutoDispatch {
-		e.autoDispatchLocked(r.ID)
 	}
 	e.notify.broadcast()
 	return r, nil
@@ -583,7 +575,6 @@ func (e *Engine) opTaskCreate(_ context.Context, caller string, raw json.RawMess
 		return nil, err
 	}
 	if t.Status == store.TaskReady {
-		e.autoDispatchLocked(run.ID)
 		t, _ = e.st.GetTask(t.ID)
 	}
 	e.notify.broadcast()
@@ -639,13 +630,9 @@ func (e *Engine) opTaskUpdate(_ context.Context, _ string, raw json.RawMessage) 
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	t, ready, err := e.st.UpdateTask(a.ID, store.TaskUpdate{Title: a.Title, Spec: a.Spec, Status: a.Status, Result: a.Result, Deps: a.Deps, ResetAttempts: a.ResetAttempts})
+	t, _, err := e.st.UpdateTask(a.ID, store.TaskUpdate{Title: a.Title, Spec: a.Spec, Status: a.Status, Result: a.Result, Deps: a.Deps, ResetAttempts: a.ResetAttempts})
 	if err != nil {
 		return nil, err
-	}
-	if len(ready) > 0 {
-		e.autoDispatchLocked(t.RunID)
-		t, _ = e.st.GetTask(t.ID)
 	}
 	e.notify.broadcast()
 	return t, nil
@@ -943,20 +930,6 @@ func (e *Engine) dispatchNext(ctx context.Context, run string) ([]store.Dispatch
 		out = append(out, d)
 	}
 	return out, nil
-}
-
-// autoDispatchLocked schedules dispatchNext for runs with auto_dispatch on. It runs
-// asynchronously because dispatching calls herdr and takes the engine lock itself.
-func (e *Engine) autoDispatchLocked(run string) {
-	r, err := e.st.GetRun(run)
-	if err != nil || !r.AutoDispatch || r.Status != store.RunRunning {
-		return
-	}
-	e.async(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_, _ = e.dispatchNext(ctx, run)
-	})
 }
 
 type DispatchActArgs struct {

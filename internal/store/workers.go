@@ -2,7 +2,6 @@ package store
 
 import (
 	"database/sql"
-	"encoding/json"
 )
 
 // WorkerLifecycleMigration preserves launch configuration and responsibility transfers.
@@ -14,62 +13,38 @@ ALTER TABLE workers ADD COLUMN hand_off_at INTEGER;
 ALTER TABLE workers ADD COLUMN hand_off_worktree TEXT;`
 
 type Worker struct {
-	PaneID          string   `json:"pane_id"`
-	RunID           string   `json:"run_id,omitempty"`
-	Name            string   `json:"name,omitempty"`
-	Agent           string   `json:"agent,omitempty"`
-	Account         string   `json:"account,omitempty"`
-	Profile         string   `json:"profile,omitempty"`
-	Model           string   `json:"model,omitempty"`
-	Worktree        string   `json:"worktree,omitempty"`
-	State           string   `json:"state"`
-	Retained        bool     `json:"retained"`
-	FlaggedAt       int64    `json:"flagged_at,omitempty"`
-	StartedAt       int64    `json:"started_at"`
-	ReleasedAt      int64    `json:"released_at,omitempty"`
-	ArchivePath     string   `json:"archive_path,omitempty"`
-	Note            string   `json:"note,omitempty"`
-	AgentArgs       []string `json:"-"`
-	LaunchKnown     bool     `json:"launch_known"`
-	Lifecycle       string   `json:"lifecycle,omitempty"`
-	HandOffTo       string   `json:"hand_off_to,omitempty"`
-	HandOffAt       int64    `json:"hand_off_at,omitempty"`
-	HandOffWorktree string   `json:"hand_off_worktree,omitempty"`
+	PaneID      string `json:"pane_id"`
+	RunID       string `json:"run_id,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Agent       string `json:"agent,omitempty"`
+	Account     string `json:"account,omitempty"`
+	Profile     string `json:"profile,omitempty"`
+	Model       string `json:"model,omitempty"`
+	Worktree    string `json:"worktree,omitempty"`
+	State       string `json:"state"`
+	FlaggedAt   int64  `json:"flagged_at,omitempty"`
+	StartedAt   int64  `json:"started_at"`
+	ReleasedAt  int64  `json:"released_at,omitempty"`
+	ArchivePath string `json:"archive_path,omitempty"`
+	Note        string `json:"note,omitempty"`
 }
 
-const workerCols = `pane_id,COALESCE(run_id,''),COALESCE(name,''),COALESCE(agent,''),COALESCE(worktree,''),state,retained,COALESCE(flagged_at,0),started_at,COALESCE(released_at,0),COALESCE(archive_path,''),COALESCE(note,''),agent_args,lifecycle,COALESCE(hand_off_to,''),COALESCE(hand_off_at,0),COALESCE(hand_off_worktree,''),COALESCE(account,''),COALESCE(profile,''),COALESCE(model,'')`
+const workerCols = `pane_id,COALESCE(run_id,''),COALESCE(name,''),COALESCE(agent,''),COALESCE(worktree,''),state,COALESCE(flagged_at,0),started_at,COALESCE(released_at,0),COALESCE(archive_path,''),COALESCE(note,''),COALESCE(account,''),COALESCE(profile,''),COALESCE(model,'')`
 
 func scanWorker(r interface{ Scan(...any) error }) (Worker, error) {
 	var w Worker
-	var args sql.NullString
-	err := r.Scan(&w.PaneID, &w.RunID, &w.Name, &w.Agent, &w.Worktree, &w.State, &w.Retained, &w.FlaggedAt, &w.StartedAt, &w.ReleasedAt, &w.ArchivePath, &w.Note, &args, &w.Lifecycle, &w.HandOffTo, &w.HandOffAt, &w.HandOffWorktree, &w.Account, &w.Profile, &w.Model)
-	if err == nil && args.Valid {
-		w.LaunchKnown = true
-		err = json.Unmarshal([]byte(args.String), &w.AgentArgs)
-	}
+	err := r.Scan(&w.PaneID, &w.RunID, &w.Name, &w.Agent, &w.Worktree, &w.State, &w.FlaggedAt, &w.StartedAt, &w.ReleasedAt, &w.ArchivePath, &w.Note, &w.Account, &w.Profile, &w.Model)
 	return w, err
 }
 
 // RegisterWorker records a live worker (insert or revive).
 func (s *Store) RegisterWorker(w Worker) (Worker, error) {
 	now := s.now()
-	var args any
-	if w.LaunchKnown {
-		a := w.AgentArgs
-		if a == nil {
-			a = []string{}
-		}
-		b, err := json.Marshal(a)
-		if err != nil {
-			return Worker{}, err
-		}
-		args = string(b)
-	}
-	res, err := s.db.Exec(`INSERT INTO workers(pane_id,run_id,name,agent,worktree,state,started_at,agent_args,account,profile,model) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+	res, err := s.db.Exec(`INSERT INTO workers(pane_id,run_id,name,agent,worktree,state,started_at,account,profile,model) VALUES(?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(pane_id) DO UPDATE SET run_id=excluded.run_id, name=excluded.name, agent=excluded.agent,
 		worktree=excluded.worktree, state=excluded.state, released_at=NULL, flagged_at=NULL,
-		agent_args=excluded.agent_args, account=excluded.account, profile=excluded.profile, model=excluded.model`,
-		w.PaneID, nullStr(w.RunID), nullStr(w.Name), nullStr(w.Agent), nullStr(w.Worktree), WorkerLive, now, args, nullStr(w.Account), nullStr(w.Profile), nullStr(w.Model))
+		account=excluded.account, profile=excluded.profile, model=excluded.model`,
+		w.PaneID, nullStr(w.RunID), nullStr(w.Name), nullStr(w.Agent), nullStr(w.Worktree), WorkerLive, now, nullStr(w.Account), nullStr(w.Profile), nullStr(w.Model))
 	if err != nil {
 		return Worker{}, err
 	}
@@ -140,7 +115,7 @@ func (s *Store) SetWorkerState(pane, state, note, archive string) error {
 	case WorkerReleased, WorkerStopped, WorkerAbandoned, WorkerExited:
 		released = now
 	}
-	_, err := s.db.Exec(`UPDATE workers SET state=?, note=COALESCE(?,note), archive_path=COALESCE(?,archive_path), released_at=COALESCE(?,released_at), lifecycle=CASE WHEN ? IS NOT NULL THEN '' ELSE lifecycle END WHERE pane_id=?`,
-		state, nullStr(note), nullStr(archive), released, released, pane)
+	_, err := s.db.Exec(`UPDATE workers SET state=?, note=COALESCE(?,note), archive_path=COALESCE(?,archive_path), released_at=COALESCE(?,released_at) WHERE pane_id=?`,
+		state, nullStr(note), nullStr(archive), released, pane)
 	return err
 }

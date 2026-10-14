@@ -24,9 +24,9 @@ import (
 
 const usage = `horch — persistent pane orchestration (mailbox, tasks, dispatch, workers)
 
-  horch run create --title T [--auto-dispatch] [--max-attempts N]
+  horch run create --title T [--max-attempts N]
   horch run use <run> | current | list | show [--run R]
-  horch run update [--run R] [--status S] [--coordinator me|PANE] [--auto on|off]
+  horch run update [--run R] [--status S] [--coordinator me|PANE]
                    [--max-attempts N] [--idle-report 10m]
 
   horch send --to coordinator|run|human|PANE|NAME [--subject S] --body B
@@ -258,20 +258,6 @@ func durMS(s string) (int64, error) {
 	return d.Milliseconds(), nil
 }
 
-func onOff(s string) (*bool, error) {
-	switch s {
-	case "":
-		return nil, nil
-	case "on", "true", "yes":
-		v := true
-		return &v, nil
-	case "off", "false", "no":
-		v := false
-		return &v, nil
-	}
-	return nil, usageErr("expected on|off, got %q", s)
-}
-
 func strPtr(f *flag.FlagSet, name string, v string) *string {
 	set := false
 	f.Visit(func(fl *flag.Flag) {
@@ -291,11 +277,9 @@ func cmdRun(ctx context.Context, sub string, args []string) error {
 	f := fs("run " + sub)
 	runID := f.String("run", "", "")
 	title := f.String("title", "", "")
-	auto := f.Bool("auto-dispatch", false, "")
 	maxA := f.Int("max-attempts", 0, "")
 	status := f.String("status", "", "")
 	coord := f.String("coordinator", "", "")
-	autoS := f.String("auto", "", "")
 	idleReport := f.String("idle-report", "", "")
 	pos, err := parse(f, args)
 	if err != nil {
@@ -309,7 +293,7 @@ func cmdRun(ctx context.Context, sub string, args []string) error {
 		if *title == "" {
 			*title = pos
 		}
-		return run(ctx, "run.create", daemon.RunCreateArgs{Title: *title, AutoDispatch: *auto, MaxAttempts: *maxA, Coordinator: *coord}, printRun)
+		return run(ctx, "run.create", daemon.RunCreateArgs{Title: *title, MaxAttempts: *maxA, Coordinator: *coord}, printRun)
 	case "use":
 		return run(ctx, "run.use", daemon.RunRef{Run: *runID}, printRun)
 	case "current":
@@ -320,12 +304,6 @@ func cmdRun(ctx context.Context, sub string, args []string) error {
 		return run(ctx, "run.show", daemon.RunRef{Run: *runID}, printRunShow)
 	case "update":
 		a := daemon.RunUpdateArgs{Run: *runID, Status: strPtr(f, "status", *status), Coordinator: strPtr(f, "coordinator", *coord), Title: strPtr(f, "title", *title)}
-		if a.AutoDispatch, err = onOff(*autoS); err != nil {
-			return err
-		}
-		if a.AutoDispatch == nil && *auto {
-			a.AutoDispatch = auto
-		}
 		if *maxA > 0 {
 			a.MaxAttempts = maxA
 		}

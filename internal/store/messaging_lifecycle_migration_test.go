@@ -3,7 +3,6 @@ package store
 import (
 	"database/sql"
 	"path/filepath"
-	"reflect"
 	"testing"
 )
 
@@ -32,9 +31,6 @@ func TestMessagingUpgradePreservesReleasedLifecycleSchema(t *testing.T) {
 	s := must[*Store](t)(Open(path))
 	defer s.Close()
 	w := must[Worker](t)(s.GetWorker("w1:p2"))
-	if !w.LaunchKnown || !reflect.DeepEqual(w.AgentArgs, []string{"--model", "model-a"}) || w.Lifecycle != "restart_failed" || w.HandOffTo != "w1:p3" || w.HandOffAt != 2 {
-		t.Fatalf("worker lifecycle lost: %+v", w)
-	}
 	d := must[Dispatch](t)(s.GetDispatch("d1"))
 	m := must[Message](t)(s.GetMessage("m1"))
 	if m.Body != "retained mail" || m.DeliveryStatus != "" {

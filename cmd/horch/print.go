@@ -50,7 +50,7 @@ func or(s, d string) string {
 func printRun(raw json.RawMessage) {
 	var r store.Run
 	_ = json.Unmarshal(raw, &r)
-	fmt.Printf("%s  %s  [%s]  coordinator=%s  auto-dispatch=%v  max-attempts=%d\n", r.ID, r.Title, r.Status, or(r.CoordinatorPaneID, "human"), r.AutoDispatch, r.MaxAttempts)
+	fmt.Printf("%s  %s  [%s]  coordinator=%s  max-attempts=%d\n", r.ID, r.Title, r.Status, or(r.CoordinatorPaneID, "human"), r.MaxAttempts)
 }
 
 func printRuns(raw json.RawMessage) {

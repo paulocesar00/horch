@@ -9,7 +9,6 @@ type Run struct {
 	Title             string `json:"title"`
 	CoordinatorPaneID string `json:"coordinator_pane_id,omitempty"`
 	Status            string `json:"status"`
-	AutoDispatch      bool   `json:"auto_dispatch"`
 	MaxAttempts       int    `json:"max_attempts"`
 	// IdleReportMS overrides how long a dispatched worker may sit idle without reporting
 	// before the coordinator is told (0 = daemon default).
@@ -18,11 +17,11 @@ type Run struct {
 	UpdatedAt    int64 `json:"updated_at"`
 }
 
-const runCols = `id,title,COALESCE(coordinator_pane_id,''),status,auto_dispatch,max_attempts,idle_report_ms,created_at,updated_at`
+const runCols = `id,title,COALESCE(coordinator_pane_id,''),status,max_attempts,idle_report_ms,created_at,updated_at`
 
 func scanRun(r interface{ Scan(...any) error }) (Run, error) {
 	var x Run
-	err := r.Scan(&x.ID, &x.Title, &x.CoordinatorPaneID, &x.Status, &x.AutoDispatch, &x.MaxAttempts, &x.IdleReportMS, &x.CreatedAt, &x.UpdatedAt)
+	err := r.Scan(&x.ID, &x.Title, &x.CoordinatorPaneID, &x.Status, &x.MaxAttempts, &x.IdleReportMS, &x.CreatedAt, &x.UpdatedAt)
 	return x, err
 }
 
@@ -110,7 +109,6 @@ func (s *Store) CurrentRun(pane string) (Run, error) {
 type RunUpdate struct {
 	Status       *string
 	Coordinator  *string
-	AutoDispatch *bool
 	MaxAttempts  *int
 	Title        *string
 	IdleReportMS *int64
@@ -140,11 +138,6 @@ func (s *Store) UpdateRun(id string, u RunUpdate) (Run, error) {
 				if err := bindPane(tx, *u.Coordinator, id, now); err != nil {
 					return err
 				}
-			}
-		}
-		if u.AutoDispatch != nil {
-			if _, err := tx.Exec(`UPDATE runs SET auto_dispatch=?,updated_at=? WHERE id=?`, *u.AutoDispatch, now, id); err != nil {
-				return err
 			}
 		}
 		if u.MaxAttempts != nil {

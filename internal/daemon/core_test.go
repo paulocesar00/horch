@@ -37,10 +37,11 @@ func TestDispatchRejectsNewWorkerBeforeCreatingTask(t *testing.T) {
 func TestPersistentWorkerHandlesTwoTasks(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
+	x.mustOp(coord, "worker.register", WorkerRegisterArgs{Pane: "w1:p2", Name: "builder"}, nil)
 	for _, title := range []string{"first", "second"} {
 		var task store.Task
 		x.mustOp(coord, "task.create", TaskCreateArgs{Title: title}, &task)
-		x.mustOp(coord, "dispatch", DispatchArgs{Task: task.ID, To: "w1:p2"}, nil)
+		x.mustOp(coord, "dispatch", DispatchArgs{Task: task.ID, To: "builder"}, nil)
 		x.status("w1:p2", "working")
 		x.mustOp("w1:p2", "send", SendArgs{Kind: store.KindDone, Body: title}, nil)
 		x.status("w1:p2", "idle")
