@@ -349,6 +349,7 @@ func (e *Engine) done(caller string, a SendArgs) (any, error) {
 	}
 	if report.Late {
 		body := fmt.Sprintf("Late report from %s for task %s (dispatch %s, already %s; outcome: %s). Reported outcome: %s. The existing settlement is unchanged.", caller, d.TaskID, d.ID, d.Status, d.Outcome, outcome)
+		body += dispatchWorkerMetadata(d)
 		if a.Subject != "" {
 			body += "\n\n" + a.Subject
 		}

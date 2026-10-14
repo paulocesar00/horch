@@ -422,6 +422,7 @@ func (e *Engine) afterSettleLocked(st store.Settlement) {
 	switch d.Status {
 	case store.DispatchCompleted:
 		body := fmt.Sprintf("Task %s (%s) completed by %s (dispatch %s).", t.ID, t.Title, d.PaneID, d.ID)
+		body += dispatchWorkerMetadata(d)
 		if t.Result != "" {
 			body += "\n\n" + t.Result
 		}
@@ -431,10 +432,10 @@ func (e *Engine) afterSettleLocked(st store.Settlement) {
 		e.messageCoordinatorLocked(d.RunID, store.KindDone, "task "+t.ID+" completed", body, t.ID, "succeeded")
 	case store.DispatchFailed:
 		e.escalateLocked(d.RunID, fmt.Sprintf("task %s dispatch failed", t.ID),
-			fmt.Sprintf("Dispatch %s of task %s (%s) to %s failed: %s. Attempt %d; the task is %s again.", d.ID, t.ID, t.Title, d.PaneID, d.Outcome, t.Attempts, t.Status), t.ID)
+			fmt.Sprintf("Dispatch %s of task %s (%s) to %s failed: %s. Attempt %d; the task is %s again.", d.ID, t.ID, t.Title, d.PaneID, d.Outcome, t.Attempts, t.Status)+dispatchWorkerMetadata(d), t.ID)
 	case store.DispatchCircuitBroken:
 		e.escalateLocked(d.RunID, fmt.Sprintf("task %s circuit broken", t.ID),
-			fmt.Sprintf("Task %s (%s) failed %d times (last: %s on %s). It is now failed; reset with `horch task update --id %s --reset-attempts --status ready`.", t.ID, t.Title, t.Attempts, d.Outcome, d.PaneID, t.ID), t.ID)
+			fmt.Sprintf("Task %s (%s) failed %d times (last: %s on %s). It is now failed; reset with `horch task update --id %s --reset-attempts --status ready`.", t.ID, t.Title, t.Attempts, d.Outcome, d.PaneID, t.ID)+dispatchWorkerMetadata(d), t.ID)
 	}
 	e.badgeTask(d.PaneID, "")
 	e.recomputeWatch()
