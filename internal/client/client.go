@@ -1,4 +1,4 @@
-// Package client connects horch and the plugin panes to the daemon, respawning it when
+// Package client connects horch to the daemon, respawning it when
 // its socket is dead.
 package client
 
@@ -44,13 +44,10 @@ func New() (*Client, error) {
 // Idempotent ops can be re-sent safely when the connection drops mid-request: they only
 // read, or (check, ask's reply wait) are long polls whose effect is keyed by the caller.
 var idempotent = map[string]bool{
-	"ping": true, "check": true, "ack": true, "inbox": true, "board": true,
+	"ping": true, "check": true, "ack": true, "inbox": true,
 	"run.current": true, "run.list": true, "run.show": true,
-	"task.list": true, "task.show": true, "dispatch.show": true, "gate.list": true,
-	"worker.show": true, "worker.list": true, "worker.read": true, "schedule.list": true,
-	"plan.show": true, "plan.events": true, "plan.config": true,
-	// Re-importing the same file is a no-op; a different file needs --replace either way.
-	"plan.import": true,
+	"task.list": true, "task.show": true, "dispatch.show": true,
+	"worker.show": true, "worker.list": true, "worker.read": true,
 }
 
 // Call runs op, starting the daemon first if its socket is dead. A request that never

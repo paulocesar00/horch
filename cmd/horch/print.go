@@ -70,10 +70,6 @@ func printRunShow(raw json.RawMessage) {
 	printRun(mustJSON(s.Run))
 	fmt.Println()
 	printTasks(mustJSON(s.Tasks))
-	if len(s.Gates) > 0 {
-		fmt.Println()
-		printGates(mustJSON(s.Gates))
-	}
 	if len(s.Workers) > 0 {
 		fmt.Println()
 		printWorkers(mustJSON(s.Workers))
@@ -185,34 +181,8 @@ func printWorkers(raw json.RawMessage) {
 	fmt.Fprintln(w, "PANE\tNAME\tAGENT\tSTATE\tRUN\tAGE\tWORKTREE")
 	for _, x := range ws {
 		state := x.State
-		if x.Retained {
-			state += "+retained"
-		}
+
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", x.PaneID, or(x.Name, "-"), or(x.Agent, "-"), state, or(x.RunID, "-"), ago(x.StartedAt), or(x.Worktree, "-"))
 	}
 	w.Flush()
-}
-
-func printGate(raw json.RawMessage) {
-	var g store.Gate
-	_ = json.Unmarshal(raw, &g)
-	fmt.Printf("%s  [%s]  task=%s  %q", g.ID, g.Status, or(g.TaskID, "-"), g.Question)
-	if len(g.Options) > 0 {
-		fmt.Printf("  options=%s", strings.Join(g.Options, "/"))
-	}
-	if g.Decision != "" {
-		fmt.Printf("  decision=%s by %s", g.Decision, g.DecidedBy)
-	}
-	fmt.Println()
-}
-
-func printGates(raw json.RawMessage) {
-	var gs []store.Gate
-	_ = json.Unmarshal(raw, &gs)
-	if len(gs) == 0 {
-		fmt.Println("no gates")
-	}
-	for _, g := range gs {
-		printGate(mustJSON(g))
-	}
 }

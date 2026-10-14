@@ -20,13 +20,8 @@ func TestLifecycleCLIWire(t *testing.T) {
 		op   string
 		want map[string]any
 	}{
-		{[]string{"dispatch", "hold", "--task", "t1", "--until", "event:review", "--reason", "waiting"}, "dispatch.hold", map[string]any{"task": "t1", "until": "event:review", "reason": "waiting"}},
-		{[]string{"dispatch", "resume", "--task", "t1"}, "dispatch.resume", map[string]any{"task": "t1"}},
 		{[]string{"dispatch", "fail", "--task", "t1", "--reason", "usage cap", "--infra"}, "dispatch.fail", map[string]any{"task": "t1", "reason": "usage cap", "infra": true}},
 		{[]string{"dispatch", "fail", "--task", "t1", "--reason", "bug"}, "dispatch.fail", map[string]any{"task": "t1", "reason": "bug"}},
-		{[]string{"worker", "restart", "--worker", "helper", "--env", "PROFILE=alternate", "--env", "MODE=test", "--unset", "API_KEY", "--unset", "OLD_PROFILE"}, "worker.restart", map[string]any{"worker": "helper", "env": []any{"PROFILE=alternate", "MODE=test"}, "unset": []any{"API_KEY", "OLD_PROFILE"}}},
-		{[]string{"worker", "release", "--worker", "helper", "--hand-off-to", "owner"}, "worker.release", map[string]any{"worker": "helper", "hand_off_to": "owner"}},
-		{[]string{"worker", "release", "--worker", "helper"}, "worker.release", map[string]any{"worker": "helper"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.op, func(t *testing.T) {

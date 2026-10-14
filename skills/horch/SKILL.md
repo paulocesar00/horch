@@ -1,297 +1,87 @@
 ---
 name: horch
-description: >-
-  Coordinate supervised agent workers inside herdr with `horch`: threaded messages,
-  blocking ask/reply, tracked task dispatch that settles on real agent state plus the
-  worker's own report, task DAGs, human decision gates, worker start/release with
-  verified process cleanup, and cron schedules. Use when asked to orchestrate,
-  supervise, fan out work to other agents, or coordinate a DAG inside herdr.
-  Requires HERDR_ENV=1.
+description: Coordinate persistent registered herdr panes with tasks, tracked dispatch, a mailbox, and blocking ask/reply.
 ---
 
-# horch — herdr orchestration
+# horch
 
-`horch` talks to the herdr-orch daemon (one per herdr session). The daemon owns all state
-(SQLite), follows herdr's real agent status (`idle | working | blocked | done | unknown`)
-and settles dispatches for you. You never poll: block on `horch check --wait`.
+Use `horch` to coordinate agents already running in herdr panes. Register each
+worker with the current run. Dispatching and completing a task leave the pane
+and its conversation running. horch never launches or releases teammates.
 
-Every command takes `--json` and exits non-zero on refusal (`{"ok":false,"error":{code,message}}`).
-Your identity is your pane (`$HERDR_PANE_ID`).
-
-## Coordinator loop
-
-```bash
-horch run create --title "Refactor auth"            # you become the coordinator
-horch task create --title "Extract token store" --spec-file /tmp/spec-a.md
-horch task create --title "Migrate callers" --deps t1 --spec "..."
-horch gate create --task t2 --question "Merge t1 first?" --options yes,no   # optional human gate
-
-horch worker start --agent claude --worktree ~/.herdr/worktrees/auth-a --name auth-a
-horch worker start --agent codex  --worktree ~/.herdr/worktrees/auth-b --name auth-b
-horch dispatch --task t1 --to auth-a                 # or --to new:codex --worktree DIR
-
-horch check --wait --timeout 30m                     # blocks until something happens
-```
-
-Messages you receive as coordinator:
-
-| kind | meaning | what to do |
-|---|---|---|
-| `done` | a dispatch settled `completed`; body has the worker's summary and newly ready tasks | review, dispatch the next task |
-| `escalation` | worker idle without reporting (dispatch still open), dispatch failed (`pane_exited`, worker-reported, `dispatch fail`), circuit broken, worker blocked at a prompt, gate timed out, unsaved work blocked a release, worktree removed under a worker | read it, `horch worker read --worker X`, decide |
-| `question` | a worker is blocked in `horch ask` | `horch reply --id mN --body "..."` |
-| `note` | gate resolved, dispatch fenced, idle worker flagged | informational |
-
-With `horch run update --auto on`, ready tasks go to idle, unretained workers of the run
-automatically (oldest task first). `horch dispatch next` does one round by hand. Retain a
-worker (`horch worker retain`) to reserve it, e.g. a PR owner waiting on its merge.
-`horch run update --flag-idle 30m` opts in to a note about unretained workers left without
-work.
-
-## Settlement rules (what "done" means)
-
-A dispatch settles only when **both** hold:
-1. the worker ran `horch done --task tN ...`, and
-2. herdr reports the agent is no longer working/blocked.
-
-- **Silence never fails a dispatch.** A worker that went `working → idle` without reporting
-  for the run's idle-report delay (default 3 min; `horch run update --idle-report 20m`)
-  produces one `escalation` to the coordinator per idle episode, with the last lines of its
-  screen. The dispatch stays open and nothing is re-dispatched — long loops, CI waits and
-  background jobs look exactly like this. Decide on your next tick:
-  `horch dispatch nudge --task tN` (asks it to report or say what it is waiting on; refused
-  while it is working) or `horch dispatch fail --task tN --reason "..."` (counts the attempt).
-  A report while the dispatch remains open settles normally. After it closes,
-  `done --task tN` appends a late note without changing the existing settlement.
-- No activity at all for 90s → one escalation ("prompt may not have landed"). horch never
-  re-sends a prompt on its own; check the pane first.
-- Pane closed or exited → `failed: pane_closed|pane_exited`.
-- A failed dispatch returns the task to `ready`; after `max_attempts` (default 3) the last
-  dispatch is `circuit_broken` and the task `failed`. Retry with
-  `horch task update --id tN --reset-attempts --status ready`.
-- `horch dispatch show --task tN` shows live status and flags state/report mismatches.
-
-## Dispatch holds and usage caps
-
-```bash
-horch dispatch hold --task tN --until 30m --reason "Waiting for review"
-horch dispatch hold --task tN --until 2026-12-01T13:00:00Z --reason "Reset time"
-horch dispatch hold --task tN --until event:review-complete --reason "Owner will resume"
-horch dispatch resume --task tN
-horch dispatch fail --task tN --infra --reason "Account unavailable"
-```
-
-Holds persist across daemon restarts and suppress idle, blocked and no-activity reminders.
-Timed holds expire automatically. Named events are descriptive: explicitly resume the task
-when the condition happens. Completion reports still settle normally. Resume gives a fresh
-grace period and does not itself send a prompt.
-
-Usage-cap notices in inactive panes produce one escalation and an automatic hold until the
-parsed reset. Clock resets use the daemon timezone unless the notice specifies an IANA zone.
-Unknown/ambiguous resets hold for `event:usage-reset` until explicit resume. The same visible
-notice does not repeat after resume. A cap outlasting an earlier coordinator hold remains held.
-`dispatch fail --infra` refunds the attempt; ordinary failure still counts toward max-attempts.
-
-## Worker side
-
-The dispatch prompt tells the worker exactly what to run. As a worker:
-
-```bash
-horch done --task t3 --body "Extracted TokenStore; branch auth-a, commit abc123, PR #42"
-horch done --task t3 --failed --body "tests need a DB fixture that doesn't exist"
-horch ask --question "Keep the legacy cookie path?"   # blocks until replied (default 2h)
-horch send --to coordinator --kind escalation --body "found a security issue in ..."
-```
-
-## Workers
-
-```bash
-horch worker start --agent claude|pi|codex --worktree DIR [--name N] [-- agent args]   # shell in worktree workspace
-horch worker start --agent codex --pane w4:p1 --name n1-1 -- --model ID  # existing shell pane,
-                                              # must have a workspace and an available shell
-horch worker register --pane w1:p4            # adopt an agent pane you already have
-horch worker list | show | read --worker N [--lines 200]
-horch worker restart --worker N --unset API_KEY --env PROFILE=alternate
-horch worker release --worker helper --hand-off-to owner  # same actual worktree, recorded transfer
-horch worker release --worker N               # archive transcript, close pane, verify every process is gone
-horch worker stop --worker N                  # fence its dispatch (attempt not counted) + close
-horch worker abandon --worker N               # fence and stop supervising; pane left open
-horch worker retain --worker N [--off]        # keep an idle worker without being nagged
-```
-
-`release`/`stop` **refuse** when the worktree has uncommitted changes or commits not on any
-remote (`unsaved_work`) and escalate instead; `--force` overrides. Release never reports
-success while a process from the pane is alive (it escalates to SIGTERM/SIGKILL and reports
-`release_failed` otherwise). A worker stuck at a startup prompt (folder trust) is escalated;
-horch never answers such prompts.
-
-Restart requests a clean exit, proves the shell is available, applies and verifies repeatable
-`--env KEY=VAL`/`--unset KEY` edits, then reuses the saved agent arguments and re-dispatches the
-same task without another attempt. Supported agents: claude, codex and pi. Adopted/older workers
-without saved launch arguments refuse restart. Failure or interruption keeps the task claimed;
-inspect and retry restart or explicitly stop/abandon. A successful restart clears dispatch holds.
-Environment edits are sourced from a private temporary script and verified in the pane shell;
-values are not printed or stored in the database.
-
-Hand-off requires a live recipient in the same actual git worktree, records who accepted the
-files, and bypasses only the unsaved-work refusal. Active dispatch and process-exit checks still
-apply. `--hand-off-to` cannot be combined with `--force`. Interrupted releases need explicit retry.
-
-
-## Resource leases and admission
+## Coordinator
 
 ```sh
-horch lease acquire --resource sim:DEVICE-UDID --worker N --ttl 2h
-horch lease acquire --resource port:3000 --worker N      # default TTL 1h
-horch lease list
-horch lease release --resource port:3000 --worker N
-horch dispatch --task t1 --to N --lease sim:DEVICE-UDID --lease db:acme_test
-horch run update --max-load 12 --min-free-mem 15          # zero disables each limit
-horch sweep --dry-run                                  # report orphan helpers
-horch sweep                                            # stop them
+horch run create --title "Refactor auth" --max-attempts 2
+horch worker register --pane w1:p2 --name builder
+horch worker register --pane w1:p3 --name reviewer
+horch task create --title "Extract token store" --spec-file spec.md
+horch task create --title "Review token store" --deps t1 --spec "Review the diff and tests."
+horch dispatch --task t1 --to builder
+horch check --wait --timeout 30m --json
 ```
 
-Leases are shared across sessions using the same plugin state root. A conflict names
-its holder; dispatch reserves all requested leases before delivery. Renew with acquire
-as the same worker before TTL expires. Successful worker release frees leases; hand-off
-transfers them to the recipient with unchanged expiry, and restart retains them. Failed
-cleanup, stop and task completion retain them. Leases are cooperative: always give tools
-the explicit leased device/port/database. Limits check one-minute load and available or
-reclaimable memory on macOS/Linux; a refusal leaves work ready for a later attempt.
+Replace pane and task IDs with the actual IDs returned in your session.
+Use `run use R` to resume a run, `run current` to inspect the current binding,
+and `run list|show|update` to inspect or change run settings.
+`task list|show|update` manages tasks, dependencies, results, and retry budgets.
+`dispatch next` assigns ready tasks to idle registered workers; `run update --auto on`
+enables the same assignment automatically. Leave auto-dispatch off when the
+coordinator must choose which teammate handles each task.
 
-Release discovers detached processes by cwd inside the registered worktree, rechecks
-identity/scope before TERM then KILL, and reports outcomes. It excludes outside processes,
-`herdr*`/`horch*`, the daemon and its ancestors. Shared live/starting worktrees refuse
-ordinary cleanup. Explicit hand-off closes only the source pane and preserves shared helpers. Inventory errors and survivors keep release incomplete and retain leases.
-Sweep defaults to no candidates and requires both a released worker-store root and fresh
-proof of an exact linked Git worktree (distinct Git/common directories and a matching
-administration backlink). Main checkouts, ordinary directories, subdirectories and missing
-roots report `not a disposable worktree` and produce zero candidates. Horch has no trusted
-worktree-creation marker today; recording or opening a root never creates that provenance.
-Live reused scopes are protected; existing stopped roots do not qualify. Both cleanup paths
-reject home and its parents, `/System`, `/Library`, `/usr`, `/Applications`, `~/Library`,
-their parents, symlink escapes and unknown/other-user ownership. Common container roots
-and OS service executables are also excluded. Disposal proof, scope and owner checks run
-before every signal. Unsafe or non-disposable release roots refuse before pane closure,
-including with `--force`. Legacy workers without a recorded worktree retain explicit
-pane closure only, without cwd cleanup or direct signals. Reports include matched
-worktrees and skipped-root reasons.
-Dry-run sends no signals. Neither command removes worktrees.
+Handle messages before dispatching more work:
 
-## Gates and schedules
+- `done`: verify the result, then dispatch any newly ready task.
+- `question`: answer with `horch reply --id mN --body "..."`.
+- `escalation`: inspect with `worker read --worker NAME` and
+  `dispatch show --task T`; decide whether to nudge or fail.
+- `note`: read the update; late reports do not reopen completed work.
 
-```bash
-horch gate create --task t4 --question "Deploy to prod?" --options approve,reject --timeout 2h
-horch gate list ;  horch gate resolve --id g1 --decision approve
-horch schedule add --cron "*/30 * * * *" --horch "dispatch next --run r1"
-horch schedule add --cron "@hourly" --prompt-to reviewer --prompt "Re-check open PRs"
-horch schedule list | run --id s1 | enable --id s1 --off | rm --id s1
-```
+`dispatch nudge --task T` asks an idle worker to report. It refuses while the
+worker is working or blocked unless explicitly forced.
+`dispatch fail --task T --reason "..."` fails the current attempt.
+Use `--infra` only for infrastructure failure; it refunds that attempt.
+Silence alone never fails a task or causes its prompt to be resent.
 
-A gate blocks its task until resolved (from the CLI or the herdr "resolve gate" popup);
-a timed-out gate escalates and keeps the task blocked.
+## Worker
 
-## Day plan
-
-The published `<date>.plan.md` is the start and end of the day. In between, the plan lives in
-horch, and every change goes through it so subscribers see it live.
-
-```bash
-horch plan import --day 2026-03-14 --file docs/orchestration/2026-03-14.plan.md --ref <commit>
-horch plan show                                   # latest plan of the default project
-horch plan transition --item B1 --state dispatched --dispatch-ref horch:r2/t15/d15@w1J:p1
-horch plan transition --item B1 --state settled --pr '#214' --note "PR up"
-horch plan item add --item B2 --issues ACME-51 --kind build --lane local --title "slice b" --position 3
-horch plan item hold --item I1 --reason "sim farm down"     # release --item I1 to resume
-horch plan item move --item W1 --to 1 ;  horch plan item remove --item U3 --note "folded into R3"
-horch plan events --follow --json                 # NDJSON stream of every change
-horch plan export --day 2026-03-14 --format md --finalize --out docs/orchestration/2026-03-14.plan.md
-```
-
-- States: `planned dispatched settled bounced ratified merged held replanned dropped`.
-- Import on approval. Re-importing the same file is a no-op. A different file needs `--replace`.
-- The orchestrator records progress with `plan transition`, never by editing the file mid-day.
-  A held item refuses transitions until released.
-- Every event carries `actor`, `actor_kind` (`human|orchestrator|worker`), `principal` and
-  `approval`. Only edits by the configured owner (`owner.principal` in
-  `~/.config/horch/config.toml`) have `approval: true`. Treat those as the owner's approval
-  of that change. Orchestrator writes never are.
-- Read-modify-write with the version you read: `--if-version N` on item commands and
-  `--if-plan-version N` on `item add` / `plan status`. `version_conflict` means reload and
-  re-decide; do not retry blindly.
-- Owner edits arrive in the coordinator's inbox as `plan replanned by <owner>: …`.
-- Every plan command takes `--project P` (default: `default_project`) and `--day D`
-  (default: latest), and the owner can act from a pane with `--principal NAME`.
-
-## Coming from Orca orchestration
-
-| Orca | horch |
-|---|---|
-| `orchestration run create/current` | `horch run create/current/use` |
-| send / check / ask / reply | same names |
-| `worker_done` message | `horch done` (settles the dispatch) |
-| task create/list/update, deps | same, `--deps a,b` |
-| dispatch + wait | `horch dispatch` + `horch check --wait` |
-| decision gates | `horch gate create/resolve/list` |
-| worker-release | `horch worker release` (closes the pane, verifies its processes exited) |
-
-Status values match Orca's, so Orca-based skills port with renames: runs `idle|running|completed|failed`, tasks
-`pending|ready|dispatched|completed|failed|blocked`, dispatches
-`pending|dispatched|completed|failed|circuit_broken`, gates `pending|resolved|timeout`.
-
-horch does not create or delete worktrees: use `herdr worktree create` (or git) and pass the path
-or the new workspace's pane to `horch worker start`.
-
-## Message receipts and mailbox ownership
-
-- `horch send --to NAME --body B --wait-pickup [--timeout 5m]` waits for receipt evidence.
-  Plain send returns after durable queuing; pane delivery runs in the background.
-- Delivery waits for an interactive idle agent (up to 2m per attempt), then observes pickup
-  for 10s. It retries once, submitting an existing collapsed paste with Enter when detected,
-  and escalates `undelivered` to the coordinator if pickup remains unconfirmed. Worker
-  lifecycle reservations block input; restart activity does not count as message pickup.
-- `horch inbox [--all] [--json]` shows queued/submitting/delivered/picked_up/undelivered,
-  attempts and timestamps. A working transition is inferred pickup, not a mailbox read.
-  `--wait-pickup` defaults to 4m25s; its timeout does not cancel background delivery.
-- A reply read by a still-running `ask` needs no pane input. Human messages use the mailbox.
-- Keep one destructive `check --wait` consumer per mailbox. A second check or ack gets
-  `mailbox_busy`, naming the command and hostname/PID holder. The lease ends on return,
-  timeout or disconnect. `check --peek` (also with `--wait`) is non-destructive.
-- `horch ack --id mN` idempotently acknowledges a message addressed to your identity.
-  Use peek then ack when processing must precede acknowledgement.
-- `horch done --task tN` after closure appends a late note to the latest dispatch and informs
-  the coordinator. It does not reopen the task or overwrite its result. Dispatch show JSON
-  includes the report history. Only the assignee can report.
-- `worker start --account LABEL --profile LABEL --model ID` records launch metadata.
-  Account/profile are labels; agent-specific selection flags belong after `--`. The model
-  flag is passed to the agent unless launch args already supply one. Supplied launch args
-  (`--account`, `--profile`, `--model`/`-m`) are also recorded. Completion notifications use
-  the dispatch's metadata snapshot, including across restart replacements. Hand-offs preserve
-  both worker identities. These are requested values, not verified runtime identity.
-
-If delivery times out or the daemon restarts mid-submission, inspect inbox and the pane
-before manually resending. An uncertain submission may already have reached the agent.
-
-## Watch PR CI
+Run the exact command included in your dispatch prompt:
 
 ```sh
-horch pr watch 12 --repo you/myapp [--until green|merged] [--run r1]
+horch done --task t1 --body "Summary; branch/commit/PR and tests"
+horch done --task t1 --failed --body "Why it failed"
+horch ask --question "Which behavior is required?"
+horch send --to coordinator --body "Progress update"
 ```
 
-Run in a supervised shell with authenticated `gh`. The foreground watcher posts to the
-selected run's coordinator inbox and prints events (`--json` for JSON lines). It never
-starts a daemon or changes a PR. Required CI uses classic protection plus active rulesets;
-when discovery is unavailable, configure `projects.<name>.required_checks` for the matching
-`repo`. Optional failures do not fail required CI. Superseded same-head runs/attempts are
-ignored. Two stable polls precede `ci green` or `required check failed: <name> <url>`.
-`--until green` exits on green/merged or a required failure; `--until merged` keeps watching
-through failures and posts `left merge queue: <reason>` and `merged`. API/delivery failures
-exit nonzero. Restarting can repeat notifications. Green is head CI evidence, not merge
-approval or merge-group validation. `--interval 15s` and `--race-window 5s` tune polling and
-push/ready warnings; inferred workflow timing is labelled as a possible race.
+`ask` blocks until a threaded reply arrives (default two hours).
+A completion report is recorded against your active dispatch or an explicit task.
+Only its assignee can report. A late report becomes a note without replacing
+the task's existing result. Pane exit fails an active dispatch; failure counts
+against the run's circuit breaker unless the coordinator uses `--infra`.
 
-`worker start --worktree DIR` finds/opens that worktree's workspace and reuses an available
-shell or creates a shell tab. It skips widgets and busy panes. `--cwd DIR` keeps the existing
-caller-workspace behavior. Do not combine `--worktree` with `--cwd` or `--pane`. A pane with
-no workspace is an error; choose a shell in a workspace. Worktree-selected workers retain
-their launch arguments for `worker restart`, which reuses the current pane.
+## Mailbox
+
+Use one consuming `check --wait` per mailbox. A second destructive consumer is
+refused with `mailbox_busy`. `check --peek` and `inbox` never consume messages;
+`ack --id mN` acknowledges a specific message addressed to you.
+`send --to NAME --body B --wait-pickup` waits for receipt evidence.
+Terminal delivery waits for an interactive idle/done agent and retries at most
+once. Inspect `inbox --json` and the pane before manually resending uncertain
+input. Receipt evidence is distinct from a mailbox read.
+
+## Inspection and restart
+
+`worker register|show|read|list` manages registration and inspection only.
+`status` reports daemon health; `daemon stop` stops only the daemon. The next
+command restarts it. Workers remain running and SQLite preserves tasks and mail.
+Clients retry only safe operations after disconnect; uncertain dispatches are
+not automatically replayed.
+
+`config` inspects per-user preferences. `version` prints the version.
+`--json` provides machine output, and commands exit nonzero on refusal.
+Identity defaults to `$HERDR_PANE_ID`, otherwise `human`; `$HORCH_AS` or `--as`
+can select another identity. Keep the session and caller identity from the
+pinned command in your task prompt.
+
+Run `horch --help` for the complete supported command syntax.

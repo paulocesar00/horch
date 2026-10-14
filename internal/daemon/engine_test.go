@@ -3,38 +3,29 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
-	"github.com/ellingtonsp/herdr-orch/internal/config"
 	"github.com/ellingtonsp/herdr-orch/internal/herdr"
 	"github.com/ellingtonsp/herdr-orch/internal/store"
 )
 
 // fakeHerdr records calls and serves canned pane state.
 type fakeHerdr struct {
-	processInfoErr error
-	mu             sync.Mutex
-	panes          map[string]*herdr.Pane
-	prompts        map[string][]string
-	typed          map[string][]string
-	notes          []string
-	closed         []string
-	pids           map[string][]int
-	named          map[string]bool // panes herdr manages (agent.prompt works)
-	nextPane       int
-	notReady       map[string]int // named panes that refuse prompts this many more times
-	startTimeout   bool           // AgentStart reports herdr's timeout but the agent comes up anyway
-	killOnClose    bool
+	mu       sync.Mutex
+	panes    map[string]*herdr.Pane
+	prompts  map[string][]string
+	typed    map[string][]string
+	notes    []string
+	named    map[string]bool // panes herdr manages (agent.prompt works)
+	notReady map[string]int  // named panes that refuse prompts this many more times
 }
 
 func newFake() *fakeHerdr {
-	return &fakeHerdr{panes: map[string]*herdr.Pane{}, prompts: map[string][]string{}, typed: map[string][]string{}, pids: map[string][]int{}, named: map[string]bool{}, notReady: map[string]int{}, killOnClose: true}
+	return &fakeHerdr{panes: map[string]*herdr.Pane{}, prompts: map[string][]string{}, typed: map[string][]string{}, named: map[string]bool{}, notReady: map[string]int{}}
 }
 
 func (f *fakeHerdr) addPane(id, agent, status string, named bool) {
@@ -95,75 +86,7 @@ func (f *fakeHerdr) Notify(_ context.Context, title, body string, _ bool) error 
 
 func (f *fakeHerdr) PaneTokens(context.Context, string, map[string]*string) error { return nil }
 
-func (f *fakeHerdr) ProcessInfo(_ context.Context, id string) (herdr.ProcessInfo, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.processInfoErr != nil {
-		return herdr.ProcessInfo{}, f.processInfoErr
-	}
-	if _, ok := f.panes[id]; !ok {
-		return herdr.ProcessInfo{}, &herdr.Error{Code: "pane_not_found", Message: id}
-	}
-	pi := herdr.ProcessInfo{}
-	for i, p := range f.pids[id] {
-		if i == 0 {
-			pi.ShellPID = p
-			pi.ForegroundProcessGroupID = p
-		} else {
-			pi.ForegroundProcesses = append(pi.ForegroundProcesses, struct {
-				PID  int    `json:"pid"`
-				Name string `json:"name"`
-			}{PID: p})
-		}
-	}
-	return pi, nil
-}
-
-func (f *fakeHerdr) PaneClose(_ context.Context, id string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.panes, id)
-	f.closed = append(f.closed, id)
-	if f.killOnClose {
-		for _, p := range f.pids[id] {
-			_ = syscall.Kill(p, syscall.SIGHUP)
-		}
-	}
-	return nil
-}
-
 func (f *fakeHerdr) PaneRead(context.Context, string, int) (string, error) { return "transcript", nil }
-
-func (f *fakeHerdr) NewTab(_ context.Context, ws, cwd, label string, _ map[string]string) (herdr.Pane, error) {
-	f.mu.Lock()
-	f.nextPane++
-	id := "w1:p" + string(rune('a'+f.nextPane))
-	f.mu.Unlock()
-	f.addPane(id, "", "unknown", false)
-	return herdr.Pane{PaneID: id, WorkspaceID: "w1"}, nil
-}
-
-func (f *fakeHerdr) WorktreePane(ctx context.Context, cwd, label string, env map[string]string) (herdr.Pane, bool, error) {
-	p, err := f.NewTab(ctx, "w2", cwd, label, env)
-	return p, true, err
-}
-
-func (f *fakeHerdr) AgentStart(_ context.Context, name, kind, pane string, _ []string) (herdr.Pane, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	a := kind
-	n := name
-	ready := true
-	f.panes[pane].Agent = &a
-	f.panes[pane].Name = &n
-	f.panes[pane].InteractiveReady = &ready
-	f.panes[pane].AgentStatus = "idle"
-	f.named[pane] = true
-	if f.startTimeout {
-		return herdr.Pane{}, &herdr.Error{Code: "timeout", Message: "timed out waiting for agent startup"}
-	}
-	return *f.panes[pane], nil
-}
 
 func (f *fakeHerdr) promptCount(p string) int {
 	f.mu.Lock()
@@ -179,8 +102,6 @@ type harness struct {
 	now time.Time
 	q   []func()
 	qmu sync.Mutex
-	// user is the per-user config the engine sees (never the real ~/.config/horch).
-	user config.Config
 }
 
 func newHarness(t *testing.T) *harness {
@@ -193,14 +114,11 @@ func newHarness(t *testing.T) *harness {
 	x := &harness{t: t, h: newFake(), st: st, now: time.Unix(1_000_000, 0)}
 	st.Now = func() time.Time { return x.now }
 	cfg := DefaultConfig()
-	cfg.ArchiveDir = t.TempDir()
-	cfg.UserConfig = func() (config.Config, error) { return x.user, nil }
 	x.e = NewEngine(st, x.h, cfg)
 	x.e.logf = t.Logf
 	x.e.deliveryLaunch = func(func()) {} // Delivery scenarios run explicitly in delivery_test.go.
 	t.Cleanup(x.e.CloseDeliveries)
 	x.e.promptRetry = time.Millisecond
-	x.e.startGrace = 50 * time.Millisecond
 	x.e.async = func(f func()) { x.qmu.Lock(); x.q = append(x.q, f); x.qmu.Unlock() }
 	return x
 }
@@ -422,19 +340,6 @@ func TestNudgeAndCoordinatorFail(t *testing.T) {
 	wantRefusal(t, err, "no_active_dispatch")
 }
 
-func TestAutoDispatchSkipsRetainedWorkers(t *testing.T) {
-	x := newHarness(t)
-	setupRun(x, "w1:p2")
-	x.mustOp(coord, "worker.retain", WorkerRef{Worker: "w1:p2"}, nil)
-	on := true
-	x.mustOp(coord, "run.update", RunUpdateArgs{AutoDispatch: &on}, nil)
-	var task store.Task
-	x.mustOp(coord, "task.create", TaskCreateArgs{Title: "A"}, &task)
-	if x.task(task.ID).Status != store.TaskReady {
-		t.Fatal("a retained worker (e.g. a PR owner) must not receive auto-dispatched work")
-	}
-}
-
 func TestIdleBeforeWorkingDoesNotSettle(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
@@ -580,18 +485,16 @@ func TestDispatchRefusesBusyAgent(t *testing.T) {
 	}
 }
 
-func TestDAGWithGateAndAutoDispatch(t *testing.T) {
-	// A → B, A → C with a human gate in front of C.
+func TestDAGAndAutoDispatch(t *testing.T) {
+	// A → B and A → C share two persistent workers.
 	x := newHarness(t)
-	r := setupRun(x, "w1:p2", "w1:p3")
+	setupRun(x, "w1:p2", "w1:p3")
 	on := true
 	x.mustOp(coord, "run.update", RunUpdateArgs{AutoDispatch: &on}, nil)
 	var a, b, c store.Task
 	x.mustOp(coord, "task.create", TaskCreateArgs{Title: "A"}, &a)
 	x.mustOp(coord, "task.create", TaskCreateArgs{Title: "B", Deps: []string{a.ID}}, &b)
 	x.mustOp(coord, "task.create", TaskCreateArgs{Title: "C", Deps: []string{a.ID}}, &c)
-	var g store.Gate
-	x.mustOp(coord, "gate.create", GateCreateArgs{Task: c.ID, Question: "ship C?", Options: []string{"yes", "no"}}, &g)
 	if x.task(a.ID).Status != store.TaskDispatched {
 		t.Fatalf("auto-dispatch should have sent A: %s", x.task(a.ID).Status)
 	}
@@ -602,17 +505,8 @@ func TestDAGWithGateAndAutoDispatch(t *testing.T) {
 	if x.task(b.ID).Status != store.TaskDispatched {
 		t.Fatalf("B should auto-dispatch after A: %s", x.task(b.ID).Status)
 	}
-	if x.task(c.ID).Status != store.TaskBlocked {
-		t.Fatalf("C should wait on the gate: %s", x.task(c.ID).Status)
-	}
-	var gs []store.Gate
-	x.mustOp("human", "gate.list", GateListArgs{Run: r.ID}, &gs)
-	if len(gs) != 1 {
-		t.Fatalf("pending gates: %+v", gs)
-	}
-	x.mustOp("human", "gate.resolve", GateResolveArgs{ID: g.ID, Decision: "yes"}, nil)
 	if x.task(c.ID).Status != store.TaskDispatched {
-		t.Fatalf("C should auto-dispatch after the gate: %s", x.task(c.ID).Status)
+		t.Fatalf("C should auto-dispatch after A: %s", x.task(c.ID).Status)
 	}
 	for _, id := range []string{b.ID, c.ID} {
 		w := x.task(id).AssigneePaneID
@@ -688,170 +582,6 @@ func TestSendToRunBroadcasts(t *testing.T) {
 	}
 }
 
-func startSleeper(t *testing.T, ignoreHUP bool, dirs ...string) int {
-	t.Helper()
-	script := "exec sleep 60"
-	if ignoreHUP {
-		script = "trap '' HUP TERM; while :; do sleep 0.1; done"
-	}
-	cmd := exec.Command("sh", "-c", script)
-	if len(dirs) > 0 {
-		cmd.Dir = dirs[0]
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	go cmd.Wait() // reap so pidAlive sees it gone
-	if ignoreHUP {
-		time.Sleep(300 * time.Millisecond) // let the trap install
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
-	return cmd.Process.Pid
-}
-
-func TestReleaseVerifiesProcessesGone(t *testing.T) {
-	x := newHarness(t)
-	setupRun(x, "w1:p2")
-	x.h.pids["w1:p2"] = []int{startSleeper(t, false)}
-	var res CloseResult
-	x.mustOp(coord, "worker.release", WorkerRef{Worker: "w1:p2"}, &res)
-	if res.Worker.State != store.WorkerReleased || len(res.PIDs) != 1 || len(res.Survivors) != 0 || res.ArchivePath == "" {
-		t.Fatalf("release: %+v", res)
-	}
-}
-
-func TestReleaseKillsStragglers(t *testing.T) {
-	x := newHarness(t)
-	setupRun(x, "w1:p2")
-	dir := gitWorktree(t)
-	w, _ := x.st.GetWorker("w1:p2")
-	w.Worktree = dir
-	x.st.RegisterWorker(w)
-	pid := startSleeper(t, true, dir) // ignores HUP and TERM: needs SIGKILL
-	x.h.pids["w1:p2"] = []int{pid}
-	var res CloseResult
-	x.mustOp(coord, "worker.release", WorkerRef{Worker: "w1:p2"}, &res)
-	if res.Worker.State != store.WorkerReleased || len(res.Killed) == 0 || pidAlive(pid) {
-		t.Fatalf("release: %+v alive=%v", res, pidAlive(pid))
-	}
-}
-
-func TestReleaseRefusesBusyWorker(t *testing.T) {
-	x := newHarness(t)
-	setupRun(x, "w1:p2")
-	var task store.Task
-	x.mustOp(coord, "task.create", TaskCreateArgs{Title: "A"}, &task)
-	x.mustOp(coord, "dispatch", DispatchArgs{Task: task.ID, To: "w1:p2"}, nil)
-	_, err := x.op(coord, "worker.release", WorkerRef{Worker: "w1:p2"})
-	wantRefusal(t, err, "worker_busy")
-	// stop fences the dispatch without counting the attempt
-	x.mustOp(coord, "worker.stop", WorkerRef{Worker: "w1:p2"}, nil)
-	tk := x.task(task.ID)
-	if tk.Status != store.TaskReady || tk.Attempts != 0 {
-		t.Fatalf("after stop: %+v", tk)
-	}
-}
-
-func TestReleaseRefusesDirtyWorktree(t *testing.T) {
-	x := newHarness(t)
-	dir := gitWorktree(t)
-	for _, args := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
-		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %s", args, out)
-		}
-	}
-	if err := exec.Command("sh", "-c", "echo x > "+dir+"/f").Run(); err != nil {
-		t.Fatal(err)
-	}
-	setupRun(x)
-	x.h.addPane("w1:p2", "pi", "idle", true)
-	x.mustOp(coord, "worker.register", WorkerRegisterArgs{Pane: "w1:p2", Worktree: dir}, nil)
-	_, err := x.op(coord, "worker.release", WorkerRef{Worker: "w1:p2"})
-	wantRefusal(t, err, "unsaved_work")
-	if ms := x.inbox(coord); len(ms) != 1 || ms[0].Kind != store.KindEscalation {
-		t.Fatalf("want escalation: %+v", ms)
-	}
-	x.mustOp(coord, "worker.release", WorkerRef{Worker: "w1:p2", Force: true}, nil)
-}
-
-func TestSweepMarksVanishedWorker(t *testing.T) {
-	x := newHarness(t)
-	setupRun(x, "w1:p2", "w1:p3")
-	delete(x.h.panes, "w1:p2")
-	x.e.Sweep(context.Background())
-	x.drain()
-	w, _ := x.st.GetWorker("w1:p2")
-	if w.State != store.WorkerExited {
-		t.Fatalf("state %s", w.State)
-	}
-	// Idle worker without a dispatch is flagged only when the run opts in.
-	x.now = x.now.Add(10 * time.Minute)
-	x.e.Sweep(context.Background())
-	x.drain()
-	if len(x.inbox(coord)) != 0 {
-		t.Fatal("idle flag must be opt-in")
-	}
-	flag := int64((5 * time.Minute).Milliseconds())
-	x.mustOp(coord, "run.update", RunUpdateArgs{IdleFlagMS: &flag}, nil)
-	x.e.Sweep(context.Background())
-	x.drain()
-	ms := x.inbox(coord)
-	if len(ms) != 1 || !strings.Contains(ms[0].Subject, "idle without a dispatch") {
-		t.Fatalf("want idle flag: %+v", ms)
-	}
-	x.e.Sweep(context.Background())
-	x.drain()
-	if len(x.inbox(coord)) != 0 {
-		t.Fatal("flag must fire once")
-	}
-}
-
-func TestWorktreeRemovedEscalates(t *testing.T) {
-	x := newHarness(t)
-	setupRun(x)
-	x.h.addPane("w1:p2", "pi", "idle", true)
-	x.mustOp(coord, "worker.register", WorkerRegisterArgs{Pane: "w1:p2", Worktree: "/tmp/wt-a"}, nil)
-	x.e.HandleEvent(herdr.Event{Name: "worktree.removed", Data: mustJSON(map[string]any{"worktree": map[string]string{"path": "/tmp/wt-a"}})})
-	x.drain()
-	ms := x.inbox(coord)
-	if len(ms) != 1 || !strings.Contains(ms[0].Subject, "worktree removed") {
-		t.Fatalf("want worktree escalation: %+v", ms)
-	}
-}
-
-func TestWorkerStartRegistersAndWatches(t *testing.T) {
-	x := newHarness(t)
-	setupRun(x)
-	x.h.addPane(coord, "claude", "idle", true)
-	var w store.Worker
-	x.mustOp(coord, "worker.start", WorkerStartArgs{Agent: "pi", Name: "alpha"}, &w)
-	if w.State != store.WorkerLive || w.Agent != "pi" {
-		t.Fatalf("worker: %+v", w)
-	}
-	found := false
-	for _, p := range x.e.WatchSet() {
-		found = found || p == w.PaneID
-	}
-	if !found {
-		t.Fatal("new worker not watched")
-	}
-}
-
-func TestScheduleHorchAction(t *testing.T) {
-	x := newHarness(t)
-	setupRun(x)
-	x.e.cfg.HorchBin = "/bin/echo"
-	var s store.Schedule
-	x.mustOp(coord, "schedule.add", ScheduleAddArgs{Cron: "@every 1m", Action: Action{Type: "horch", Args: []string{"hello"}}}, &s)
-	var hist []store.ScheduleRun
-	x.mustOp(coord, "schedule.run", ScheduleRef{ID: s.ID}, &hist)
-	if len(hist) != 1 || !hist[0].OK || strings.TrimSpace(hist[0].Output) != "hello" {
-		t.Fatalf("history: %+v", hist)
-	}
-	_, err := x.op(coord, "schedule.add", ScheduleAddArgs{Cron: "nope", Action: Action{Type: "horch", Args: []string{"x"}}})
-	wantRefusal(t, err, "bad_cron")
-}
-
 func TestDispatchRetriesNamedAgentNotYetReady(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
@@ -906,43 +636,4 @@ func TestIdleEscalationWakesCheckWait(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("idle escalation did not wake check --wait")
 	}
-}
-
-func TestWorkerStartInExistingPane(t *testing.T) {
-	x := newHarness(t)
-	setupRun(x)
-	x.h.addPane("w2:p1", "", "unknown", false)
-	cwd := "/tmp/wt-x"
-	x.h.panes["w2:p1"].Cwd = &cwd
-	x.h.panes["w2:p1"].Agent = nil
-	x.h.pids["w2:p1"] = []int{2_000_000_000}
-	var w store.Worker
-	x.mustOp(coord, "worker.start", WorkerStartArgs{Agent: "codex", Name: "it-codex", Pane: "w2:p1"}, &w)
-	canonical, _ := processRoot(cwd)
-	if w.PaneID != "w2:p1" || w.Worktree != canonical || x.h.nextPane != 0 {
-		t.Fatalf("worker %+v newTabs=%d", w, x.h.nextPane)
-	}
-	_, err := x.op(coord, "worker.start", WorkerStartArgs{Agent: "pi", Pane: "w2:p1", Name: "again"})
-	wantRefusal(t, err, "pane_busy")
-}
-
-func TestWorkerStartSurvivesHerdrStartTimeout(t *testing.T) {
-	x := newHarness(t)
-	setupRun(x)
-	x.h.addPane("w2:p1", "", "unknown", false)
-	x.h.panes["w2:p1"].Agent = nil
-	x.h.pids["w2:p1"] = []int{2_000_000_000}
-	x.h.startTimeout = true
-	var w store.Worker
-	x.mustOp(coord, "worker.start", WorkerStartArgs{Agent: "claude", Name: "h1r-1", Pane: "w2:p1"}, &w)
-	if w.PaneID != "w2:p1" || w.State != store.WorkerLive {
-		t.Fatalf("slow start should still register the worker: %+v", w)
-	}
-	// A pane where no agent ever appears is still an error, and its pane is left alone.
-	x.h.addPane("w3:p1", "", "unknown", false)
-	x.h.panes["w3:p1"].Agent = nil
-	x.h.startTimeout = false
-	x.h.mu.Lock()
-	x.h.named["w3:p1"] = false
-	x.h.mu.Unlock()
 }

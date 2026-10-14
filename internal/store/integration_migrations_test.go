@@ -95,12 +95,17 @@ func TestUpgradeReleasedMainPreservesHoldsAndLifecycle(t *testing.T) {
 			s := must[*Store](t)(Open(path))
 			defer s.Close()
 			r := must[Run](t)(s.GetRun("r1"))
-			if r.Title != "existing run" || r.MaxLoad != 0 || r.MinFreeMem != 0 {
+			if r.Title != "existing run" {
 				t.Fatal(r)
 			}
 			d := must[Dispatch](t)(s.GetDispatch("d1"))
-			if d.Status != DispatchDispatched || d.HoldEvent != "ci-green" || d.HoldReason != "review pending" || d.UsageCapNotice != "cap warning" || !d.UsageCapUnknown {
+			if d.Status != DispatchDispatched {
 				t.Fatal(d)
+			}
+			var hold, reason, cap string
+			var unknown bool
+			if err := s.db.QueryRow(`SELECT hold_event,hold_reason,usage_cap_notice,usage_cap_unknown FROM dispatches WHERE id='d1'`).Scan(&hold, &reason, &cap, &unknown); err != nil || hold != "ci-green" || reason != "review pending" || cap != "cap warning" || !unknown {
+				t.Fatalf("legacy fields changed: %q %q %q %v %v", hold, reason, cap, unknown, err)
 			}
 			w := must[Worker](t)(s.GetWorker("w1:worker"))
 			if version >= 6 && (!w.LaunchKnown || len(w.AgentArgs) != 2 || w.Lifecycle != "restart_failed" || w.HandOffTo != "w1:recipient" || w.HandOffAt != 42 || w.HandOffWorktree != "/tmp/example") {

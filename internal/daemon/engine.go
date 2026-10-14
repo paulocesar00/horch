@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ellingtonsp/herdr-orch/internal/config"
 	"github.com/ellingtonsp/herdr-orch/internal/herdr"
 	"github.com/ellingtonsp/herdr-orch/internal/store"
 )
@@ -26,17 +25,10 @@ type Herdr interface {
 	AgentGet(ctx context.Context, target string) (herdr.Pane, error)
 	Notify(ctx context.Context, title, body string, urgent bool) error
 	PaneTokens(ctx context.Context, paneID string, tokens map[string]*string) error
-	ProcessInfo(ctx context.Context, paneID string) (herdr.ProcessInfo, error)
-	PaneClose(ctx context.Context, paneID string) error
 	PaneRead(ctx context.Context, paneID string, lines int) (string, error)
-	NewTab(ctx context.Context, workspaceID, cwd, label string, env map[string]string) (herdr.Pane, error)
-	WorktreePane(ctx context.Context, cwd, label string, env map[string]string) (herdr.Pane, bool, error)
-	AgentStart(ctx context.Context, name, kind, paneID string, args []string) (herdr.Pane, error)
 }
 
 type Config struct {
-	// SystemMetrics overrides host capacity collection (nil uses the OS).
-	SystemMetrics func(context.Context) (HostMetrics, error)
 	// IdleReportAfter is how long a dispatched worker may sit idle after working, with no
 	// `horch done`, before the coordinator is told (once per idle episode). The dispatch is
 	// never failed for this: long loops, CI waits and background jobs look the same.
@@ -47,15 +39,10 @@ type Config struct {
 	// BlockedAfter is how long a worker must stay blocked before it is escalated, so a
 	// permission prompt that auto mode or the coordinator clears in seconds pages nobody.
 	BlockedAfter time.Duration
-	// ArchiveDir receives pane transcripts on release.
-	ArchiveDir string
-	// HorchBin is the horch binary used by scheduled `horch` actions and named in prompts.
+	// HorchBin is the horch binary named in task prompts.
 	HorchBin string
 	// HerdrSock is the herdr session socket, pinned in worker prompts.
 	HerdrSock string
-	// UserConfig loads ~/.config/horch/config.toml (owner principal, default project). It
-	// is read on each plan write, so edits apply without a daemon restart.
-	UserConfig func() (config.Config, error)
 }
 
 func DefaultConfig() Config {
@@ -63,29 +50,21 @@ func DefaultConfig() Config {
 		IdleReportAfter: 3 * time.Minute,
 		UnobservedAfter: 90 * time.Second,
 		BlockedAfter:    20 * time.Second,
-		UserConfig:      config.Load,
 	}
 }
 
 type Engine struct {
-	processMu    sync.Mutex // serialize process launch, registration and cleanup
-	starting     map[string]int
-	processes    processHost
-	processGrace time.Duration
-	mu           sync.Mutex
-	st           *store.Store
-	h            Herdr
-	cfg          Config
-	notify       notifier
-	hub          planHub
-	logf         func(string, ...any)
+	mu     sync.Mutex
+	st     *store.Store
+	h      Herdr
+	cfg    Config
+	notify notifier
+	logf   func(string, ...any)
 
 	status      map[string]string         // pane → last known agent status
 	blocked     map[string]time.Time      // pane → when its current blocked episode began
 	blockedTold map[string]bool           // pane → current blocked episode already escalated
-	closing     map[string]bool           // panes we are closing ourselves
 	consumers   map[string]*consumerLease // active destructive mailbox RPC by recipient
-	capChecked  map[string]time.Time      // dispatch -> last usage-cap screen check
 	watchMu     sync.Mutex
 	watched     map[string]bool
 	rewatch     chan struct{}
@@ -102,16 +81,12 @@ type Engine struct {
 	workingSeq     map[string]uint64
 
 	promptRetry time.Duration
-	startGrace  time.Duration // extra wait for an agent after herdr's start timeout
 
 	// async runs herdr side effects (notifications, badges) off the engine lock.
 	async func(func())
 }
 
 func NewEngine(st *store.Store, h Herdr, cfg Config) *Engine {
-	if err := st.RecoverWorkerLifecycles(); err != nil {
-		log.Printf("recover worker lifecycle: %v", err)
-	}
 	deliveryCtx, deliveryCancel := context.WithCancel(context.Background())
 	return &Engine{
 		deliveryCtx: deliveryCtx, deliveryCancel: deliveryCancel,
@@ -124,15 +99,12 @@ func NewEngine(st *store.Store, h Herdr, cfg Config) *Engine {
 		notify:      notifier{ch: make(chan struct{})},
 		logf:        log.Printf,
 		status:      map[string]string{},
-		capChecked:  map[string]time.Time{},
 		blocked:     map[string]time.Time{},
 		blockedTold: map[string]bool{},
-		closing:     map[string]bool{},
 		consumers:   map[string]*consumerLease{},
 		watched:     map[string]bool{},
 		rewatch:     make(chan struct{}, 1),
 		promptRetry: 750 * time.Millisecond,
-		startGrace:  2 * time.Minute,
 		async:       func(f func()) { go f() },
 	}
 }
@@ -252,15 +224,6 @@ func (e *Engine) HandleEvent(ev herdr.Event) {
 		if json.Unmarshal(ev.Data, &d) == nil {
 			e.paneGone(d.PaneID, strings.TrimPrefix(ev.Name, "pane."))
 		}
-	case "worktree.removed":
-		var d struct {
-			Worktree struct {
-				Path string `json:"path"`
-			} `json:"worktree"`
-		}
-		if json.Unmarshal(ev.Data, &d) == nil && d.Worktree.Path != "" {
-			e.worktreeRemoved(d.Worktree.Path)
-		}
 	}
 }
 
@@ -289,9 +252,6 @@ func (e *Engine) setStatusLocked(pane, status string) {
 		return
 	}
 	e.status[pane] = status
-	if e.st.WorkerLifecycleHeld(pane) {
-		return
-	}
 	if status == "working" {
 		e.workingSeq[pane]++
 	}
@@ -329,17 +289,8 @@ func (e *Engine) paneGone(pane, why string) {
 	delete(e.status, pane)
 	delete(e.blocked, pane)
 	delete(e.blockedTold, pane)
-	if e.closing[pane] || e.st.WorkerLifecycleHeld(pane) {
-		return
-	}
 	if d, err := e.st.ActiveDispatchForPane(pane); err == nil {
-		if d.UsageCapNotice != "" && d.Held(e.st.Now().UnixMilli()) {
-			if st, err := e.st.Fence(d.ID, "usage cap: pane_"+why); err == nil {
-				e.afterSettleLocked(st)
-			}
-		} else {
-			e.settleLocked(d, false, "failed: pane_"+why, "")
-		}
+		e.settleLocked(d, false, "failed: pane_"+why, "")
 	}
 	if w, err := e.st.GetWorker(pane); err == nil && w.State == store.WorkerLive {
 		_ = e.st.SetWorkerState(pane, store.WorkerExited, "pane "+why, "")
@@ -348,30 +299,9 @@ func (e *Engine) paneGone(pane, why string) {
 	e.notify.broadcast()
 }
 
-func (e *Engine) worktreeRemoved(path string) {
-	normalized, err := processRoot(path)
-	if err != nil {
-		return
-	}
-	path = normalized
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	ws, err := e.st.ListWorkers("", true)
-	if err != nil {
-		return
-	}
-	for _, w := range ws {
-		if w.Worktree != "" && (w.Worktree == path || strings.HasPrefix(w.Worktree, strings.TrimSuffix(path, "/")+"/")) {
-			e.escalateLocked(w.RunID, fmt.Sprintf("worktree removed under live worker %s", w.PaneID),
-				fmt.Sprintf("Worktree %s was removed while worker %s (%s) was still running in it. Check the worker before it commits anything.", path, w.PaneID, w.Agent), "")
-		}
-	}
-}
-
 // ---------- settlement ----------
 
-// Tick re-evaluates every active dispatch (silent-grace and unobserved timers) and expires
-// gates. Called every second.
+// Tick re-evaluates active dispatches and escalates blocked workers. Called every second.
 func (e *Engine) Tick() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -382,15 +312,6 @@ func (e *Engine) Tick() {
 		}
 	}
 	e.escalateBlockedLocked()
-	if gs, err := e.st.ExpireGates(); err == nil {
-		for _, g := range gs {
-			e.escalateLocked(g.RunID, "gate "+g.ID+" timed out",
-				fmt.Sprintf("Decision gate %s (%q) timed out; task %s stays blocked until someone runs `horch gate resolve --id %s --decision ...`.", g.ID, g.Question, g.TaskID, g.ID), g.TaskID)
-		}
-		if len(gs) > 0 {
-			e.notify.broadcast()
-		}
-	}
 }
 
 // escalateBlockedLocked escalates workers that have stayed blocked for BlockedAfter, once
@@ -398,10 +319,7 @@ func (e *Engine) Tick() {
 func (e *Engine) escalateBlockedLocked() {
 	now := e.st.Now()
 	for pane, since := range e.blocked {
-		if e.st.WorkerLifecycleHeld(pane) || e.blockedTold[pane] || now.Sub(since) < e.cfg.BlockedAfter {
-			continue
-		}
-		if d, err := e.st.ActiveDispatchForPane(pane); err == nil && d.Held(now.UnixMilli()) {
+		if e.blockedTold[pane] || now.Sub(since) < e.cfg.BlockedAfter {
 			continue
 		}
 		e.blockedTold[pane] = true
@@ -423,10 +341,10 @@ func (e *Engine) escalateBlockedLocked() {
 //     once per idle episode (with the screen tail); the dispatch stays open
 //   - nothing observed for UnobservedAfter → tell the coordinator once (never resend blindly)
 //
-// Silence is never failure: only the worker's own --failed report, its pane going away, a
-// stop, or the coordinator's `horch dispatch fail` fails a dispatch.
+// Silence is never failure: only a worker failure report, pane exit, or coordinator
+// `horch dispatch fail` fails a dispatch.
 func (e *Engine) evaluateLocked(d store.Dispatch) {
-	if !d.Active() || d.Status == store.DispatchPending || e.st.WorkerLifecycleHeld(d.PaneID) {
+	if !d.Active() || d.Status == store.DispatchPending {
 		return
 	}
 	now := e.st.Now().UnixMilli()
@@ -443,17 +361,6 @@ func (e *Engine) evaluateLocked(d store.Dispatch) {
 			outcome = "failed: reported by worker"
 		}
 		e.settleLocked(d, ok, outcome, result)
-		return
-	}
-	if d.HoldUntil > 0 && d.HoldUntil <= now {
-		var err error
-		d, err = e.expireHoldLocked(d)
-		if err != nil {
-			return
-		}
-	}
-	d = e.detectCapLocked(d)
-	if d.Held(now) {
 		return
 	}
 	if d.DoneMessageID == "" && d.SawWorking && d.IdleSince > 0 && !d.IdleEscalated &&
@@ -517,11 +424,9 @@ func (e *Engine) settleLocked(d store.Dispatch, ok bool, outcome, result string)
 
 func (e *Engine) afterSettleLocked(st store.Settlement) {
 	d, t := st.Dispatch, st.Task
-	delete(e.capChecked, d.ID)
 	switch d.Status {
 	case store.DispatchCompleted:
 		body := fmt.Sprintf("Task %s (%s) completed by %s (dispatch %s).", t.ID, t.Title, d.PaneID, d.ID)
-		body += dispatchWorkerMetadata(d)
 		if t.Result != "" {
 			body += "\n\n" + t.Result
 		}
@@ -531,10 +436,10 @@ func (e *Engine) afterSettleLocked(st store.Settlement) {
 		e.messageCoordinatorLocked(d.RunID, store.KindDone, "task "+t.ID+" completed", body, t.ID, "succeeded")
 	case store.DispatchFailed:
 		e.escalateLocked(d.RunID, fmt.Sprintf("task %s dispatch failed", t.ID),
-			fmt.Sprintf("Dispatch %s of task %s (%s) to %s failed: %s. Attempt %d; the task is %s again.", d.ID, t.ID, t.Title, d.PaneID, d.Outcome, t.Attempts, t.Status)+dispatchWorkerMetadata(d), t.ID)
+			fmt.Sprintf("Dispatch %s of task %s (%s) to %s failed: %s. Attempt %d; the task is %s again.", d.ID, t.ID, t.Title, d.PaneID, d.Outcome, t.Attempts, t.Status), t.ID)
 	case store.DispatchCircuitBroken:
 		e.escalateLocked(d.RunID, fmt.Sprintf("task %s circuit broken", t.ID),
-			fmt.Sprintf("Task %s (%s) failed %d times (last: %s on %s). It is now failed; reset with `horch task update --id %s --reset-attempts --status ready`.", t.ID, t.Title, t.Attempts, d.Outcome, d.PaneID, t.ID)+dispatchWorkerMetadata(d), t.ID)
+			fmt.Sprintf("Task %s (%s) failed %d times (last: %s on %s). It is now failed; reset with `horch task update --id %s --reset-attempts --status ready`.", t.ID, t.Title, t.Attempts, d.Outcome, d.PaneID, t.ID), t.ID)
 	}
 	e.badgeTask(d.PaneID, "")
 	e.recomputeWatch()

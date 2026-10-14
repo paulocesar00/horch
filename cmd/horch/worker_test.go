@@ -53,28 +53,6 @@ func workerCLIRequest(t *testing.T, args ...string) rpc.Request {
 	return <-requests
 }
 
-func TestWorkerCLIWorktreeAndLegacyCwd(t *testing.T) {
-	for _, flag := range []string{"--worktree", "--cwd"} {
-		t.Run(flag, func(t *testing.T) {
-			dir := t.TempDir()
-			req := workerCLIRequest(t, "worker", "start", "--agent", "codex", "--name", "you", flag, dir, "--", "--example")
-			var args daemon.WorkerStartArgs
-			if err := json.Unmarshal(req.Args, &args); err != nil {
-				t.Fatal(err)
-			}
-			if req.Op != "worker.start" || args.Agent != "codex" || args.Name != "you" || len(args.Args) != 1 || args.Args[0] != "--example" {
-				t.Fatalf("request=%+v args=%+v", req, args)
-			}
-			if flag == "--worktree" && (args.Worktree != dir || args.Cwd != "") {
-				t.Fatalf("worktree flag lost workspace routing: %+v", args)
-			}
-			if flag == "--cwd" && (args.Cwd != dir || args.Worktree != "") {
-				t.Fatalf("legacy cwd changed workspace routing: %+v", args)
-			}
-		})
-	}
-}
-
 func TestWorkerRegisterPreservesCwdAlias(t *testing.T) {
 	for _, flag := range []string{"--worktree", "--cwd"} {
 		t.Run(flag, func(t *testing.T) {

@@ -68,13 +68,13 @@ func (s *Store) RegisterWorker(w Worker) (Worker, error) {
 	res, err := s.db.Exec(`INSERT INTO workers(pane_id,run_id,name,agent,worktree,state,started_at,agent_args,account,profile,model) VALUES(?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(pane_id) DO UPDATE SET run_id=excluded.run_id, name=excluded.name, agent=excluded.agent,
 		worktree=excluded.worktree, state=excluded.state, released_at=NULL, flagged_at=NULL,
-		agent_args=excluded.agent_args, account=excluded.account, profile=excluded.profile, model=excluded.model WHERE workers.lifecycle=''`,
+		agent_args=excluded.agent_args, account=excluded.account, profile=excluded.profile, model=excluded.model`,
 		w.PaneID, nullStr(w.RunID), nullStr(w.Name), nullStr(w.Agent), nullStr(w.Worktree), WorkerLive, now, args, nullStr(w.Account), nullStr(w.Profile), nullStr(w.Model))
 	if err != nil {
 		return Worker{}, err
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
-		return Worker{}, refuse("worker_lifecycle_busy", "worker %s is held for a lifecycle operation", w.PaneID)
+		return Worker{}, refuse("worker_not_registered", "worker %s registration did not update a row", w.PaneID)
 	}
 	if w.RunID != "" {
 		if err := bindPane(s.db, w.PaneID, w.RunID, now); err != nil {
@@ -105,7 +105,7 @@ func (s *Store) FindWorker(ref string) (Worker, error) {
 	return w2, err2
 }
 
-// ListWorkers lists workers in run ("" = all); liveOnly limits to live/release_failed.
+// ListWorkers lists workers in run ("" = all); liveOnly limits to live workers.
 func (s *Store) ListWorkers(run string, liveOnly bool) ([]Worker, error) {
 	q := `SELECT ` + workerCols + ` FROM workers WHERE 1=1`
 	var args []any
@@ -114,7 +114,7 @@ func (s *Store) ListWorkers(run string, liveOnly bool) ([]Worker, error) {
 		args = append(args, run)
 	}
 	if liveOnly {
-		q += ` AND state IN ('live','release_failed')`
+		q += ` AND state='live'`
 	}
 	rows, err := s.db.Query(q+` ORDER BY started_at`, args...)
 	if err != nil {
@@ -142,102 +142,5 @@ func (s *Store) SetWorkerState(pane, state, note, archive string) error {
 	}
 	_, err := s.db.Exec(`UPDATE workers SET state=?, note=COALESCE(?,note), archive_path=COALESCE(?,archive_path), released_at=COALESCE(?,released_at), lifecycle=CASE WHEN ? IS NOT NULL THEN '' ELSE lifecycle END WHERE pane_id=?`,
 		state, nullStr(note), nullStr(archive), released, released, pane)
-	return err
-}
-
-func (s *Store) SetRetained(pane string, retained bool) error {
-	res, err := s.db.Exec(`UPDATE workers SET retained=? WHERE pane_id=?`, retained, pane)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return refuse("unknown_worker", "pane %s is not a registered worker", pane)
-	}
-	return nil
-}
-
-func (s *Store) SetFlagged(pane string, at int64) error {
-	var v any
-	if at > 0 {
-		v = at
-	}
-	_, err := s.db.Exec(`UPDATE workers SET flagged_at=? WHERE pane_id=?`, v, pane)
-	return err
-}
-
-// WorkerLifecycleHeld fails closed if lifecycle state cannot be read.
-func (s *Store) WorkerLifecycleHeld(pane string) bool {
-	var phase string
-	err := s.db.QueryRow(`SELECT lifecycle FROM workers WHERE pane_id=?`, pane).Scan(&phase)
-	return err != sql.ErrNoRows && (err != nil || phase != "")
-}
-
-func (s *Store) BeginWorkerLifecycle(pane, phase string) error {
-	res, err := s.db.Exec(`UPDATE workers SET lifecycle=? WHERE pane_id=? AND state IN ('live','release_failed') AND (lifecycle='' OR (lifecycle='restart_failed' AND ? IN ('restart','stopping','abandoning')) OR (lifecycle='release_interrupted' AND ? IN ('releasing','stopping','abandoning')))`, phase, pane, phase, phase)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n != 1 {
-		return refuse("worker_lifecycle_busy", "worker %s has another lifecycle operation or is not live", pane)
-	}
-	return nil
-}
-
-func (s *Store) SetWorkerLifecycle(pane, phase string) error {
-	_, err := s.db.Exec(`UPDATE workers SET lifecycle=? WHERE pane_id=?`, phase, pane)
-	return err
-}
-
-// ReplaceWorkerDispatch starts a new dispatch history entry without exposing the task
-// to auto-dispatch or consuming an additional task attempt.
-func (s *Store) ReplaceWorkerDispatch(oldID string) (Dispatch, error) {
-	var id string
-	err := s.tx(func(tx *sql.Tx) error {
-		d, err := scanDisp(tx.QueryRow(`SELECT `+dispCols+` FROM dispatches WHERE id=?`, oldID))
-		if err != nil {
-			return err
-		}
-		if !d.Active() {
-			return refuse("dispatch_settled", "dispatch %s already settled", oldID)
-		}
-		var phase string
-		if err := tx.QueryRow(`SELECT lifecycle FROM workers WHERE pane_id=?`, d.PaneID).Scan(&phase); err != nil {
-			return err
-		}
-		if phase != "restart" {
-			return refuse("worker_lifecycle_busy", "worker is not held for restart")
-		}
-		id, err = nextID(tx, "d")
-		if err != nil {
-			return err
-		}
-		now := s.now()
-		if _, err := tx.Exec(`UPDATE dispatches SET status=?,settled_at=?,outcome='fenced: worker restart' WHERE id=?`, DispatchFailed, now, oldID); err != nil {
-			return err
-		}
-		_, err = tx.Exec(`INSERT INTO dispatches(id,task_id,run_id,pane_id,agent,prompt_hash,status,started_at,account,profile,model) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, d.TaskID, d.RunID, d.PaneID, nullStr(d.Agent), nullStr(d.PromptHash), DispatchPending, now, nullStr(d.Account), nullStr(d.Profile), nullStr(d.Model))
-		return err
-	})
-	if err != nil {
-		return Dispatch{}, err
-	}
-	return s.GetDispatch(id)
-}
-
-func (s *Store) RecordWorkerHandOff(pane, target, root string) error {
-	res, err := s.db.Exec(`UPDATE workers SET hand_off_to=?,hand_off_at=?,hand_off_worktree=? WHERE pane_id=? AND lifecycle='releasing'`, target, s.now(), root, pane)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n != 1 {
-		return refuse("worker_lifecycle_busy", "worker is not held for release")
-	}
-	return nil
-}
-
-// RecoverWorkerLifecycles runs once when the daemon acquires ownership. Interrupted
-// operations require an explicit retry; recipients themselves remain safe to supervise.
-func (s *Store) RecoverWorkerLifecycles() error {
-	_, err := s.db.Exec(`UPDATE workers SET lifecycle=CASE lifecycle WHEN 'restart' THEN 'restart_failed' WHEN 'releasing' THEN 'release_interrupted' WHEN 'receiving_hand_off' THEN '' WHEN 'stopping' THEN 'release_interrupted' WHEN 'abandoning' THEN 'release_interrupted' ELSE lifecycle END WHERE lifecycle<>''`)
 	return err
 }
