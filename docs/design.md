@@ -1,239 +1,53 @@
-# herdr-orch design
+# horch design
 
-## Goal
+horch coordinates persistent agents already running in herdr panes. It registers
+workers, dispatches task specifications, tracks reports, and delivers mailbox messages.
+It does not create agents, close panes, manage processes, or own Git worktrees.
 
-Give herdr the coordination layer that multi-agent work needs — a mailbox, tasks with
-dependencies, tracked dispatch, decision gates, supervised workers and schedules — as one
-plugin, built on what herdr already does well: it knows each agent's real lifecycle state
-(`idle | working | blocked | done | unknown`) and streams it as events.
+## Runtime
 
-## Principles
+The herdr plugin starts one daemon per session. The daemon owns the SQLite store,
+serves a mode-0600 Unix socket, and follows pane status and exit events. A session
+lock prevents concurrent writers. A replacement daemon takes over the socket;
+clients reconnect only for operations safe to repeat. Uncertain dispatches are not
+blindly replayed.
 
-1. **One writer.** Only the daemon writes to SQLite. The `horch` CLI, the board and the gate
-   popup go through the daemon's unix socket. No multi-writer races to guard against, and no
-   state that lives only in memory: the daemon can be restarted at any time.
-2. **Settle on evidence, not silence.** A dispatch completes when the worker reports
-   (`horch done`) *and* herdr shows it is no longer working. A worker that goes quiet is reported
-   to the coordinator, never failed or re-dispatched automatically. Long loops, CI waits and
-   background jobs are indistinguishable from "forgot to report", so the decision belongs to
-   the coordinator (`dispatch nudge`, `dispatch fail`).
-3. **Fail only on positive evidence:** the worker's own `--failed`, its pane closing or exiting,
-   a stop, or the coordinator's `dispatch fail`. Task failures count toward a per-task circuit breaker; infrastructure fencing refunds its attempt.
-4. **Never claim a release that left a process alive.** Release records the pane's process ids,
-   closes the pane, waits, escalates to SIGTERM then SIGKILL, and reports `release_failed` with
-   the survivors otherwise. It refuses when the worktree has uncommitted or unpushed work.
-5. **Escalate, don't guess.** Blocked prompts, startup dialogs, prompts that never landed and
-   worktrees removed under a live worker all go to the coordinator (and, where urgent, a herdr
-   notification). horch never answers an agent's dialog. Mailbox delivery retries once
-   with the same message ID; dispatch settlement still never blindly re-dispatches work.
+The watch set contains registered live workers and active dispatches. Status is
+resynchronized after each subscription reconnect. A one-second tick checks idle,
+blocked, and unobserved dispatch timers and notifies the coordinator.
 
-## Architecture
+## State
 
-```
-herdr server
-  ├─ [[startup]]  herdr-orch daemon     events.subscribe, SQLite, timers, orch.sock
-  ├─ [[panes]]    herdr-orch board      runs → tasks → workers → gates → inbox
-  ├─ [[panes]]    herdr-orch gate       popup: resolve a pending decision gate
-  └─ [[actions]]  board / resolve gate / dispatch next / install CLI
-agents ──► horch ──► $STATE/sessions/<session>/orch.sock ──► daemon ──► herdr socket API
-```
+Runs group tasks and workers and identify a coordinator. Tasks have specifications,
+dependencies, attempt counts, and results. Only tasks whose dependencies completed
+become ready. The coordinator explicitly dispatches tasks; settlement never starts
+another dispatch. Dispatches claim a task and a pane before submitting the prompt,
+then record observed activity and the worker's completion report. Failed attempts
+are limited by the run's circuit breaker; explicit infrastructure failures refund
+the attempt. A task finishing does not end its worker's conversation.
 
-- **State:** `$HERDR_PLUGIN_STATE_DIR/sessions/<session>/orch.db` (WAL). herdr's plugin state
-  directory is shared across herdr sessions, so everything is namespaced by session.
-- **Session identity:** `HERDR_SOCKET_PATH` decides the session (agent helpers can carry a stale
-  `HERDR_SESSION`).
-- **Singleton:** an exclusive `flock` on `orch.lock`. A new daemon asks the old one to exit and
-  takes over (the newest copy is attached to the live server after a handoff). The daemon exits
-  when its lock or socket file is replaced, or herdr has been unreachable for 30s, because herdr
-  never reaps plugin startup processes.
-- **Events:** one `events.subscribe` connection holds global pane/worktree events plus a
-  per-pane `pane.agent_status_changed` subscription for every watched pane. It is rebuilt when
-  the watched set changes, and statuses are re-synced after every (re)connect.
-- **Delivery:** `agent.prompt` for agents herdr manages (retried while a freshly started agent
-  becomes interactive); typed text + Enter for panes herdr does not manage as named agents.
+Messages record sender, recipient, kind, thread, and independent read and terminal
+delivery receipts. Completion reports stay associated with their dispatch;
+late reports become notes and do not overwrite the settlement.
 
-## Data model
+Historical migrations remain ordered and non-destructive. Legacy plan, gate,
+schedule, hold, admission, and worker-lifecycle data stays in the database but no
+longer controls dispatch or supervision. The shared resource lease database is
+not opened. Mailbox consumer reservations are still connection-scoped in memory.
 
-| Table | Holds |
-|---|---|
-| `runs` | title, coordinator pane, status, auto-dispatch, max attempts, idle-report and idle-flag delays, load and memory admission limits |
-| `messages` | from, to, kind (`note, question, reply, done, escalation`), task, reply-to, read state, delivery/pickup receipts |
-| `dispatch_reports` | immutable report-to-dispatch associations, including late notes |
-| `tasks` | spec, deps, status, assignee, attempts, result |
-| `dispatches` | task, pane, status, observed activity, done report, idle/unobserved escalation flags, nudges, outcome |
-| `gates` | task, question, options, decision, timeout |
-| `workers` | pane, run, agent, launch account/profile/model, worktree, state (`live, released, stopped, abandoned, exited, release_failed`), retained |
-| `schedules`, `schedule_runs` | cron spec, action, history |
+## Mailbox
 
-Ids are short and typeable (`r1`, `t7`, `d9`, `m42`, `g1`, `s1`).
+`check --wait` waits for messages; `check --peek` and `inbox` do not consume them.
+`ack` acknowledges a specific message. Only one destructive consumer may hold a
+mailbox at a time. `ask` waits for a threaded `reply`.
 
-## Cleanup, leases and admission
+Terminal delivery waits for an interactive idle/done recipient and records
+submission and pickup separately. Retries are bounded. After a daemon restart,
+uncertain submissions are escalated rather than resent automatically. See
+[messaging.md](messaging.md) for receipt meanings and timing.
 
-Worker release inventories same-user process cwd paths before and after pane closure.
-Only canonical descendants of the registered worktree are signal candidates. PID start
-identity, cwd and protected executable names are checked again before TERM and KILL.
-The daemon and its ancestors are protected. Cleanup refuses overlapping live/starting
-worktrees; startup reserves its scope before launch and closing workers cannot be
-registered or dispatched again. New helpers discovered after signaling are handled in
-bounded passes. Unresolved inspection errors or survivors retain resource ownership.
-An explicit `sweep` (optionally `--dry-run`) uses recorded released linked
-worktrees, excludes reused live scopes, and reports per-process outcomes and skipped roots.
+The plugin exposes only daemon startup and CLI installation. `horch --help` and
+`horch guide` describe the supported commands.
 
-Leases live in a shared `leases.db` at the plugin state root, alongside `sessions/`.
-Each session attaches this registry to its SQLite connection. A resource is a unique
-key; the holder includes session database identity and worker pane, so identical pane
-or dispatch IDs from different sessions cannot steal or free each other's resources.
-A dispatch claims its task and all requested leases in one serialized transaction before
-prompt submission. An explicit pre-delivery rejection releases only newly acquired
-leases; uncertain delivery retains them until release or expiry. Successful worker
-release updates its state and removes its leases together; hand-off instead transfers them
-to the reserved recipient with unchanged expiry. Restart keeps its resource reservations. The session database uses WAL:
-a crash during a multi-database commit can leave a conservative unsent claim or lease;
-TTL bounds that stale reservation. No prompt is sent until commit returns successfully.
-
-Run admission samples host load and available memory immediately before claiming a
-new dispatch. Zero limits preserve existing behavior. Refusals leave ready tasks for
-manual or later automatic retry. Enabled checks fail closed if OS metrics are unavailable.
-These limits do not measure per-worker consumption or enforce a running-worker quota.
-## Dispatch and worker lifecycle
-
-Dispatch holds store a deadline or named event, reason and actor. Named event holds require
-explicit resume. Timed expiry resets supervision grace. Holds suppress idle, blocked and
-unobserved escalation, while completion can still settle. Usage-cap recognition is restricted
-to standalone notices from inactive panes; the cap signature, reset, automatic hold and
-coordinator escalation are committed in one transaction. A cap deferred by an earlier manual
-hold survives that hold's expiry. Missing reset evidence means an explicit-resume event hold.
-
-Workers persist launch arguments separately from public worker JSON. Lifecycle reservations
-prevent status settlement, new dispatches and competing worker operations during restart or
-hand-off. Restart proves shell availability before environment mutation and requires a unique
-acknowledgment before launch. The replacement dispatch is created transactionally while the
-task remains claimed, keeping attempts unchanged. Interrupted restart remains held for explicit
-recovery. Interrupted teardown requires another explicit operation; it cannot silently skip
-unsaved-work validation after a crash.
-
-Release hand-off reserves both workers, verifies their live pane directories resolve to the
-same git worktree, and persists a responsibility receipt before teardown. It bypasses only the
-unsaved-work check; active-dispatch and source-pane process cleanup rules are retained.
-Worktree-wide termination is disabled for hand-off so the recipient and shared helpers
-remain running. After source cleanup succeeds, leases move to the recipient and its recorded
-worktree is reconciled to the verified shared root, protecting helpers from later sweeps.
-
-## Day plans
-
-The day plan has three phases. Only the middle one lives in horch.
-
-1. **Publish (your coordinator skill).** The skill writes the proposal, the owner
-   approves it, and `<date>.plan.md` is committed on the day-log branch.
-2. **Live (horch).** On approval, `horch plan import --day D --file <date>.plan.md --ref <commit>`
-   seeds the plan store. From then on every change goes through the store: orchestrator
-   transitions (`horch plan transition`) and the owner's re-order, hold, release, add and remove
-   (`horch plan item …`). Each write appends to an event log that subscribers receive as it happens.
-3. **Finalize (the skill, new mechanism).** At EOD,
-   `horch plan export --day D --format md --finalize --out <date>.plan.md` renders the plan plus
-   its event log back into the file, and the skill commits it. `final` freezes the plan.
-
-| Table | Holds |
-|---|---|
-| `plans` | id `<project>/<day>`, published ref + source hash, status (`draft, live, final`), coordinator pane, the file's other sections (verbatim), version |
-| `plan_items` | stable id, position, issues, kind, lane, model, state, PR, dispatch ref, title, What row (issues/where/model/output), why, held + reason (+ state held from), listed, version |
-| `plan_decisions` | the "Decisions that come back" bullets |
-| `plan_events` | seq, time, actor (pane or `human`), actor kind (`human, orchestrator, worker`), principal, approval, op, item, note, before/after JSON, plan version. **Append-only**: triggers refuse UPDATE and DELETE |
-
-Item states: `planned dispatched settled bounced ratified merged held replanned dropped`.
-
-- **Markdown.** `internal/planmd` parses the Items, What, Why, "Held on purpose" and Decisions
-  sections into rows and keeps every other section verbatim. Exporting a freshly imported
-  plan reproduces the published file byte for byte, and an export (with its event log)
-  imports back to the same plan. Held rows that are not Items rows become unlisted held
-  items: they appear only under "Held on purpose" until released.
-  Live exports include all items in the Items table, with a canonical JSON `details`
-  column preserving held-from state, listing status, ordering and multiline values.
-  When importing an export, that column supplies the item's complete content; the other
-  cells and What/Why/Held sections are readable projections. Edit `details` when changing
-  an exported item before re-importing. Published proposals without this column retain
-  their existing layout and parsing behavior. Versions and timestamps are assigned anew
-  on import; the exported event log is displayed as text, not replayed into the new store.
-- **Import is idempotent.** Re-importing the same file is a no-op and keeps live edits. A
-  different file for the same day is refused unless `--replace`, which reseeds the items and
-  keeps the event log.
-- **Identity and approval.** Every write records the caller (`--as` / `$HORCH_AS` / the pane /
-  `human`). The daemon decides the actor kind and approval; the caller never does. A named
-  principal (`--principal` / `$HORCH_PRINCIPAL`), or a terminal outside herdr (which acts for the
-  configured owner), is `human`. A registered worker pane, or a pane with an active dispatch,
-  is `worker`. Any other pane is `orchestrator`. Only writes by `owner.principal` from
-  `~/.config/horch/config.toml` carry `approval: true`. That flag is what a coordinator skill
-  counts as the owner's approval of a steer, not commit authorship.
-- **Optimistic concurrency.** Items and the plan carry versions. Writes with
-  `--if-version` (item) or `--if-plan-version` (plan) are refused with `version_conflict` when
-  stale, so a stale UI or CLI never overwrites a newer change. Every write bumps the item's
-  version and the plan's.
-- **Guards.** A held item cannot be transitioned (except to `dropped`/`replanned`) until released.
-  Holding goes through `item hold`, never `--state held`. A `final` plan refuses all writes.
-- **Fan-out.** Writes publish their events to an in-daemon hub. `plan.subscribe` is a streaming
-  op on orch.sock: the backlog after `--since`, then one line per event as it is committed.
-  Pushes, not polls. `horch plan events --follow` resumes from the last seq if the daemon
-  restarts. A subscriber more than 256 events behind is dropped and reconnects without loss.
-  `plan.events --wait` is the long-poll equivalent.
-- **Notifications.** A human edit (not import) messages the plan's coordinator (the pane that
-  imported it, else the newest running run's coordinator): `plan replanned by <principal>: …`,
-  saying whether it counts as the owner's approval.
-
-### Per-user config
-
-`~/.config/horch/config.toml` (`$HORCH_CONFIG` overrides; `config.example.toml` documents it):
-owner principal, default project, default agent kind/model/Codex effort per role, slot limits,
-per-project plan-file path and day-log branch patterns (`<date>` placeholder), and integrations
-(Linear team). Secrets are never in the file. The loader refuses secret-looking keys without
-echoing their values; `LinearAPIKey` reads `$LINEAR_API_KEY` (or the configured env var) or
-the macOS Keychain, and nothing prints it. The daemon re-reads the file on each plan write, so
-an owner change applies without a restart. `horch config` shows the file and what is missing
-(the web UI's first-run screen uses the same list).
-
-## Out of scope
-
-- Multi-machine coordination: every agent runs against one herdr server.
-- Browser, simulator and desktop automation.
-- Owning git worktrees: herdr (`herdr worktree create`) or git does that. horch only refuses to
-  release work that is unsaved, and reports a worktree removed under a live worker.
-
-## Risks
-
-| What breaks | Effect | Mitigation |
-|---|---|---|
-| herdr misreports an agent's state | A dispatch could settle early or be reported idle | Settlement also requires the worker's `done`; idleness only escalates; `dispatch show` flags mismatches |
-| The daemon dies | Messages stop flowing | The CLI respawns it; SQLite keeps everything; statuses are re-synced on subscribe |
-| A herdr API change | Orchestration stops | `min_herdr_version`, and a protocol check that refuses to start (with a notification) on an unknown protocol |
-| Release with unsaved work | Lost changes | Refuse on uncommitted or unpushed work; `--force` is explicit |
-| A stale plan editor | Overwrites a newer change | `--if-version` / `--if-plan-version` refuse stale writes |
-| A pane claims to be the owner | A false approval | Local trust only (orch.sock is 0600, same user); a web UI should set the principal from the viewer's authenticated identity (e.g. a VPN or SSO header), never from the request body |
-
-## Mailbox reliability
-
-[Messaging](messaging.md) specifies receipt evidence, bounded retries, consumer leases and
-late reports. Receipt state is durable; per-connection mailbox leases and per-pane delivery
-serialization are daemon-local. Restart resumes only jobs with no submission attempt and
-escalates uncertain writes. Completion report association and message insertion are atomic;
-late notes preserve settlement. Dispatches snapshot launch metadata for historical accuracy.
-
-### Cleanup scope authorization
-
-Sweep authorizes a process only through an explicit released worker-store root with
-fresh proof of an exact linked Git worktree. Git’s canonical top-level must equal the
-recorded root, its Git directory must differ from its common directory, and its linked
-administration backlink must point at that root. Read-only Git queries have a bounded
-timeout and ignore inherited Git environment overrides and global/system configuration.
-Main checkouts, non-Git roots, subdirectories and missing roots are report-only with
-`not a disposable worktree`. Existing stopped roots are not eligible. No trusted
-horch-created marker exists today: opening or recording an existing directory does not
-create such provenance, and removed roots cannot be authorized from history alone.
-
-The shared cleanup scope used by release, hand-off, sweep and bounded rescans rejects
-home/system roots and their ancestors, rejects filesystem container roots and OS service
-executables, checks known current-user ownership, resolves cwd symlinks, and verifies
-disposal proof and containment again immediately before every signal. Release rechecks
-proof before pane closure, even with `--force`. Legacy empty-worktree registrations
-retain explicit pane closure and exit verification only: no cwd inventory cleanup or
-direct signals. No eligible root means no candidates or
-host inventory. Reports include matched roots and separate `skipped_worktrees` entries;
-literal existing ` (deleted)` directory names retain their boundaries.
+Only the herdr plugin launches the daemon. A CLI with an unavailable socket
+returns `daemon_not_running` instead of executing a daemon from an agent pane.

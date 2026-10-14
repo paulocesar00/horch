@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X github.com/ellingtonsp/herdr-orch/internal/daemon.Version=v$
 GOFLAGS := -trimpath
 OUT ?= bin
 
-.PHONY: build test race vet install-cli link integration live live-team clean
+.PHONY: build test race vet install-cli link integration live-team clean
 
 build:
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUT)/herdr-orch ./cmd/herdr-orch
@@ -26,14 +26,9 @@ install-cli: build
 link: build
 	herdr plugin link $(CURDIR)
 
-# Exit scenarios against an isolated herdr session (fake agents, plus real claude/pi/codex
-# start-and-release unless SKIP_REAL_AGENTS=1).
+# End-to-end checks against an isolated herdr session.
 integration: build
 	./scripts/integration.sh
-
-# Real claude + codex workers each do a small task end to end (spends a few agent turns).
-live: build
-	./scripts/live-dispatch.sh
 
 # Persistent registered Codex + Claude panes: dispatch, done, ask/reply, busy pane,
 # daemon restart (spends real agent turns).

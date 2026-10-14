@@ -8,13 +8,11 @@ package config
 import (
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -41,30 +39,6 @@ type Web struct {
 	OwnerPrincipal   string `toml:"owner_principal" json:"owner_principal"`
 	IdentityHeader   string `toml:"identity_header" json:"identity_header"`
 	AllowLocalWrites bool   `toml:"allow_local_writes" json:"allow_local_writes"`
-}
-
-const DefaultWebListen = "127.0.0.1:7171"
-
-func (c Config) WebSettings() Web {
-	w := c.Web
-	if w.Listen == "" {
-		w.Listen = DefaultWebListen
-	}
-	if w.OwnerPrincipal == "" {
-		w.OwnerPrincipal = c.Owner.Principal
-	}
-	return w
-}
-func ValidateWebListen(address string) error {
-	_, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return errors.New("web.listen: want host:port")
-	}
-	n, err := strconv.Atoi(port)
-	if err != nil || n < 0 || n > 65535 {
-		return errors.New("web.listen: invalid port")
-	}
-	return nil
 }
 
 // Owner is the human running horch. Principal is the identity whose plan edits count as approvals.
@@ -109,14 +83,8 @@ type Linear struct {
 }
 
 // PlanFile is the plan path for day (YYYY-MM-DD).
-func (p Project) PlanFile(day string) string {
-	return strings.ReplaceAll(p.PlanPath, "<date>", day)
-}
 
 // Branch is the day-log branch for day (YYYY-MM-DD).
-func (p Project) Branch(day string) string {
-	return strings.ReplaceAll(p.DayLogBranch, "<date>", day)
-}
 
 // Path returns the config file location: $HORCH_CONFIG, else $XDG_CONFIG_HOME/horch/config.toml
 // when XDG_CONFIG_HOME is absolute, else ~/.config/horch/config.toml.
@@ -225,14 +193,6 @@ var (
 
 // Validate checks enum values, ranges, and that DefaultProject exists.
 func (c Config) Validate() error {
-	for _, ch := range c.Web.IdentityHeader {
-		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || strings.ContainsRune("!#$%&'*+-.^_`|~", ch)) {
-			return errors.New("web.identity_header: want an HTTP header name")
-		}
-	}
-	if err := ValidateWebListen(c.WebSettings().Listen); err != nil {
-		return err
-	}
 	for name, p := range c.Projects {
 		for _, check := range p.RequiredChecks {
 			if strings.TrimSpace(check) == "" {

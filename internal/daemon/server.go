@@ -63,14 +63,13 @@ func Run(ctx context.Context, o Options) error {
 		return errors.New(msg)
 	}
 
-	st, err := store.OpenWithLeaseRegistry(p.DB, p.LeaseDB)
+	st, err := store.Open(p.DB)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
 	cfg := o.Config
-	cfg.ArchiveDir = p.Archive
 	cfg.HerdrSock = p.HerdrSock
 	e := NewEngine(st, hc, cfg)
 	e.logf = logf
@@ -117,23 +116,15 @@ func Run(ctx context.Context, o Options) error {
 	go e.subscribeLoop(ctx, hc, o.HerdrGoneAfter, cancel)
 
 	go func() {
-		e.Sweep(ctx)
 		tick := time.NewTicker(time.Second)
 		defer tick.Stop()
-		n := 0
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
-				n++
 				e.Tick()
-				if n%15 == 0 {
-					e.RunDueSchedules(ctx)
-				}
-				if n%60 == 0 {
-					e.Sweep(ctx)
-				}
+
 			}
 		}
 	}()
@@ -152,7 +143,6 @@ func (e *Engine) subscribeLoop(ctx context.Context, hc *herdr.Client, goneAfter 
 	for ctx.Err() == nil {
 		subs := []herdr.Subscription{
 			{"type": "pane.closed"}, {"type": "pane.exited"},
-			{"type": "worktree.removed"},
 		}
 		for _, p := range e.WatchSet() {
 			subs = append(subs, herdr.Subscription{"type": "pane.agent_status_changed", "pane_id": p})

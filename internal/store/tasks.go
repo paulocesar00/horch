@@ -131,20 +131,6 @@ func refreshReadiness(q querier, run string, now int64) ([]string, error) {
 		order = append(order, t.ID)
 	}
 	rows.Close()
-	gated := map[string]bool{}
-	grows, err := q.Query(`SELECT task_id FROM gates WHERE run_id=? AND task_id IS NOT NULL AND status IN (?,?)`, run, GatePending, GateTimeout)
-	if err != nil {
-		return nil, err
-	}
-	for grows.Next() {
-		var id string
-		if err := grows.Scan(&id); err != nil {
-			grows.Close()
-			return nil, err
-		}
-		gated[id] = true
-	}
-	grows.Close()
 	var nowReady []string
 	for _, id := range order {
 		t := all[id]
@@ -152,14 +138,10 @@ func refreshReadiness(q querier, run string, now int64) ([]string, error) {
 			continue
 		}
 		want := TaskReady
-		if gated[id] {
-			want = TaskBlocked
-		} else {
-			for _, d := range t.Deps {
-				if all[d].Status != TaskCompleted {
-					want = TaskPending
-					break
-				}
+		for _, d := range t.Deps {
+			if all[d].Status != TaskCompleted {
+				want = TaskPending
+				break
 			}
 		}
 		if want != t.Status {
@@ -183,9 +165,9 @@ type TaskUpdate struct {
 	ResetAttempts bool
 }
 
-// UpdateTask edits a task. Status may be set to pending|ready (re-evaluated against deps
-// and gates), completed or failed. A dispatched task's status cannot be changed here;
-// stop or fence its dispatch instead. Returns tasks that became ready.
+// UpdateTask edits a task. Pending/ready are re-evaluated against deps. Completed
+// and failed are explicit outcomes. Fail or settle an active dispatch before
+// changing its task status. Returns tasks that became ready.
 func (s *Store) UpdateTask(id string, u TaskUpdate) (Task, []string, error) {
 	var ready []string
 	err := s.tx(func(tx *sql.Tx) error {
@@ -238,7 +220,7 @@ func (s *Store) UpdateTask(id string, u TaskUpdate) (Task, []string, error) {
 		}
 		if u.Status != nil {
 			if t.Status == TaskDispatched {
-				return refuse("task_dispatched", "task %s is dispatched; use `horch worker stop` or wait for it to settle", id)
+				return refuse("task_dispatched", "task %s is dispatched; use `horch dispatch fail` or wait for it to settle", id)
 			}
 			switch *u.Status {
 			case TaskPending, TaskReady:

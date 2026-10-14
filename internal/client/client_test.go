@@ -74,3 +74,30 @@ func TestLostRequestIsNotResentUnlessIdempotent(t *testing.T) {
 		t.Fatalf("check was sent %d times; an idempotent op should be retried once", n)
 	}
 }
+
+func TestUnavailableDaemonNeverLaunchesFromPane(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "spawned")
+	bin := filepath.Join(dir, "daemon")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HORCH_DAEMON_BIN", bin)
+	t.Setenv("HERDR_PANE_ID", "w1:developer")
+	c := &Client{Paths: paths.Paths{Sock: filepath.Join(dir, "missing.sock"), Dir: dir, Log: filepath.Join(dir, "daemon.log")}, Caller: Caller()}
+	for _, err := range []error{
+		c.Call(context.Background(), "ping", nil, nil),
+		c.Stream(context.Background(), "removed.stream", nil, func(json.RawMessage) error { return nil }),
+	} {
+		var refusal *rpc.Error
+		if !errors.As(err, &refusal) || refusal.Code != "daemon_not_running" {
+			t.Fatalf("missing daemon: %v", err)
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("client launched daemon: %v", err)
+	}
+	if _, err := os.Stat(c.Paths.Log); !os.IsNotExist(err) {
+		t.Fatalf("client opened daemon log: %v", err)
+	}
+}

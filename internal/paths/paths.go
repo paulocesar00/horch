@@ -18,12 +18,10 @@ const PluginID = "herdr-orch"
 type Paths struct {
 	Session   string
 	Dir       string
-	LeaseDB   string
 	DB        string
 	Sock      string
 	Lock      string
 	Log       string
-	Archive   string
 	HerdrSock string
 }
 
@@ -78,7 +76,7 @@ func xdg(env string, fallback ...string) string {
 func Resolve() (Paths, error) {
 	sess := Session()
 	dir := filepath.Join(stateBase(), "sessions", sess)
-	if err := os.MkdirAll(filepath.Join(dir, "archive"), 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return Paths{}, err
 	}
 	sock := filepath.Join(dir, "orch.sock")
@@ -97,14 +95,14 @@ func Resolve() (Paths, error) {
 		}
 	}
 	return Paths{
-		Session:   sess,
-		Dir:       dir,
-		DB:        filepath.Join(dir, "orch.db"),
-		LeaseDB:   filepath.Join(stateBase(), "leases.db"),
-		Sock:      sock,
-		Lock:      filepath.Join(dir, "orch.lock"),
-		Log:       filepath.Join(dir, "daemon.log"),
-		Archive:   filepath.Join(dir, "archive"),
+		Session: sess,
+		Dir:     dir,
+		DB:      filepath.Join(dir, "orch.db"),
+
+		Sock: sock,
+		Lock: filepath.Join(dir, "orch.lock"),
+		Log:  filepath.Join(dir, "daemon.log"),
+
 		HerdrSock: herdrSock,
 	}, nil
 }

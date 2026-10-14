@@ -2,7 +2,6 @@ package store
 
 import (
 	"database/sql"
-	"math"
 )
 
 type Run struct {
@@ -10,24 +9,19 @@ type Run struct {
 	Title             string `json:"title"`
 	CoordinatorPaneID string `json:"coordinator_pane_id,omitempty"`
 	Status            string `json:"status"`
-	AutoDispatch      bool   `json:"auto_dispatch"`
 	MaxAttempts       int    `json:"max_attempts"`
 	// IdleReportMS overrides how long a dispatched worker may sit idle without reporting
 	// before the coordinator is told (0 = daemon default).
 	IdleReportMS int64 `json:"idle_report_ms,omitempty"`
-	// IdleFlagMS > 0 flags live, unretained workers that sit that long with no dispatch.
-	IdleFlagMS int64   `json:"idle_flag_ms,omitempty"`
-	MaxLoad    float64 `json:"max_load,omitempty"`
-	MinFreeMem float64 `json:"min_free_mem,omitempty"`
-	CreatedAt  int64   `json:"created_at"`
-	UpdatedAt  int64   `json:"updated_at"`
+	CreatedAt    int64 `json:"created_at"`
+	UpdatedAt    int64 `json:"updated_at"`
 }
 
-const runCols = `id,title,COALESCE(coordinator_pane_id,''),status,auto_dispatch,max_attempts,idle_report_ms,idle_flag_ms,max_load,min_free_mem,created_at,updated_at`
+const runCols = `id,title,COALESCE(coordinator_pane_id,''),status,max_attempts,idle_report_ms,created_at,updated_at`
 
 func scanRun(r interface{ Scan(...any) error }) (Run, error) {
 	var x Run
-	err := r.Scan(&x.ID, &x.Title, &x.CoordinatorPaneID, &x.Status, &x.AutoDispatch, &x.MaxAttempts, &x.IdleReportMS, &x.IdleFlagMS, &x.MaxLoad, &x.MinFreeMem, &x.CreatedAt, &x.UpdatedAt)
+	err := r.Scan(&x.ID, &x.Title, &x.CoordinatorPaneID, &x.Status, &x.MaxAttempts, &x.IdleReportMS, &x.CreatedAt, &x.UpdatedAt)
 	return x, err
 }
 
@@ -115,13 +109,9 @@ func (s *Store) CurrentRun(pane string) (Run, error) {
 type RunUpdate struct {
 	Status       *string
 	Coordinator  *string
-	AutoDispatch *bool
 	MaxAttempts  *int
 	Title        *string
 	IdleReportMS *int64
-	IdleFlagMS   *int64
-	MaxLoad      *float64
-	MinFreeMem   *float64
 }
 
 func (s *Store) UpdateRun(id string, u RunUpdate) (Run, error) {
@@ -150,11 +140,6 @@ func (s *Store) UpdateRun(id string, u RunUpdate) (Run, error) {
 				}
 			}
 		}
-		if u.AutoDispatch != nil {
-			if _, err := tx.Exec(`UPDATE runs SET auto_dispatch=?,updated_at=? WHERE id=?`, *u.AutoDispatch, now, id); err != nil {
-				return err
-			}
-		}
 		if u.MaxAttempts != nil {
 			if *u.MaxAttempts < 1 {
 				return refuse("bad_value", "max attempts must be >= 1")
@@ -168,32 +153,6 @@ func (s *Store) UpdateRun(id string, u RunUpdate) (Run, error) {
 				return refuse("bad_value", "idle report delay must be >= 0")
 			}
 			if _, err := tx.Exec(`UPDATE runs SET idle_report_ms=?,updated_at=? WHERE id=?`, *u.IdleReportMS, now, id); err != nil {
-				return err
-			}
-		}
-		if u.IdleFlagMS != nil {
-			if *u.IdleFlagMS < 0 {
-				return refuse("bad_value", "idle flag delay must be >= 0")
-			}
-			if _, err := tx.Exec(`UPDATE runs SET idle_flag_ms=?,updated_at=? WHERE id=?`, *u.IdleFlagMS, now, id); err != nil {
-				return err
-			}
-		}
-		if u.MaxLoad != nil {
-			v := *u.MaxLoad
-			if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
-				return refuse("bad_value", "max load must be >= 0 (0 disables)")
-			}
-			if _, err := tx.Exec(`UPDATE runs SET max_load=?,updated_at=? WHERE id=?`, v, now, id); err != nil {
-				return err
-			}
-		}
-		if u.MinFreeMem != nil {
-			v := *u.MinFreeMem
-			if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 100 {
-				return refuse("bad_value", "minimum free memory must be 0..100 percent (0 disables)")
-			}
-			if _, err := tx.Exec(`UPDATE runs SET min_free_mem=?,updated_at=? WHERE id=?`, v, now, id); err != nil {
 				return err
 			}
 		}
