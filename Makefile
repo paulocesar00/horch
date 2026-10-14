@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X github.com/ellingtonsp/herdr-orch/internal/daemon.Version=v$
 GOFLAGS := -trimpath
 OUT ?= bin
 
-.PHONY: build test race vet install-cli link integration live clean
+.PHONY: build test race vet install-cli link integration live live-team clean
 
 build:
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUT)/herdr-orch ./cmd/herdr-orch
@@ -34,6 +34,11 @@ integration: build
 # Real claude + codex workers each do a small task end to end (spends a few agent turns).
 live: build
 	./scripts/live-dispatch.sh
+
+# Persistent registered Codex + Claude panes: dispatch, done, ask/reply, busy pane,
+# daemon restart, Codex sandbox probes (spends real agent turns).
+live-team: build
+	./scripts/live-team.sh
 
 clean:
 	rm -rf bin dist
