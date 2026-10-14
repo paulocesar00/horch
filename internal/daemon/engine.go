@@ -80,15 +80,17 @@ type Engine struct {
 	hub          planHub
 	logf         func(string, ...any)
 
-	status      map[string]string         // pane → last known agent status
-	blocked     map[string]time.Time      // pane → when its current blocked episode began
-	blockedTold map[string]bool           // pane → current blocked episode already escalated
-	closing     map[string]bool           // panes we are closing ourselves
-	consumers   map[string]*consumerLease // active destructive mailbox RPC by recipient
-	capChecked  map[string]time.Time      // dispatch -> last usage-cap screen check
-	watchMu     sync.Mutex
-	watched     map[string]bool
-	rewatch     chan struct{}
+	status        map[string]string         // pane → last known agent status
+	statusSeq     map[string]uint64         // pane → status/exit observation revision
+	doneIdleSince map[string]int64          // dispatch → start of idle after its report
+	blocked       map[string]time.Time      // pane → when its current blocked episode began
+	blockedTold   map[string]bool           // pane → current blocked episode already escalated
+	closing       map[string]bool           // panes we are closing ourselves
+	consumers     map[string]*consumerLease // active destructive mailbox RPC by recipient
+	capChecked    map[string]time.Time      // dispatch -> last usage-cap screen check
+	watchMu       sync.Mutex
+	watched       map[string]bool
+	rewatch       chan struct{}
 
 	deliveryMu     sync.Mutex
 	deliveryPanes  map[string]*sync.Mutex
@@ -100,6 +102,7 @@ type Engine struct {
 	deliveryPickup time.Duration
 	deliveryPoll   time.Duration
 	workingSeq     map[string]uint64
+	paneEpoch      map[string]uint64
 
 	promptRetry time.Duration
 	startGrace  time.Duration // extra wait for an agent after herdr's start timeout
@@ -113,27 +116,53 @@ func NewEngine(st *store.Store, h Herdr, cfg Config) *Engine {
 		log.Printf("recover worker lifecycle: %v", err)
 	}
 	deliveryCtx, deliveryCancel := context.WithCancel(context.Background())
-	return &Engine{
+	e := &Engine{
 		deliveryCtx: deliveryCtx, deliveryCancel: deliveryCancel,
-		deliveryPanes: map[string]*sync.Mutex{}, workingSeq: map[string]uint64{},
+		deliveryPanes: map[string]*sync.Mutex{}, workingSeq: map[string]uint64{}, paneEpoch: map[string]uint64{},
 		deliveryLaunch: func(f func()) { go f() },
 		deliveryReady:  2 * time.Minute, deliveryPickup: 10 * time.Second, deliveryPoll: 500 * time.Millisecond,
-		st:          st,
-		h:           h,
-		cfg:         cfg,
-		notify:      notifier{ch: make(chan struct{})},
-		logf:        log.Printf,
-		status:      map[string]string{},
-		capChecked:  map[string]time.Time{},
-		blocked:     map[string]time.Time{},
-		blockedTold: map[string]bool{},
-		closing:     map[string]bool{},
-		consumers:   map[string]*consumerLease{},
-		watched:     map[string]bool{},
-		rewatch:     make(chan struct{}, 1),
-		promptRetry: 750 * time.Millisecond,
-		startGrace:  2 * time.Minute,
-		async:       func(f func()) { go f() },
+		st:            st,
+		h:             h,
+		cfg:           cfg,
+		notify:        notifier{ch: make(chan struct{})},
+		logf:          log.Printf,
+		status:        map[string]string{},
+		statusSeq:     map[string]uint64{},
+		doneIdleSince: map[string]int64{},
+		capChecked:    map[string]time.Time{},
+		blocked:       map[string]time.Time{},
+		blockedTold:   map[string]bool{},
+		closing:       map[string]bool{},
+		consumers:     map[string]*consumerLease{},
+		watched:       map[string]bool{},
+		rewatch:       make(chan struct{}, 1),
+		promptRetry:   750 * time.Millisecond,
+		startGrace:    2 * time.Minute,
+		async:         func(f func()) { go f() },
+	}
+	e.recoverPendingDispatches()
+	return e
+}
+
+func (e *Engine) recoverPendingDispatches() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ds, err := e.st.ActiveDispatches()
+	if err != nil {
+		e.logf("recover pending dispatches: %v", err)
+		return
+	}
+	for _, d := range ds {
+		if d.Status != store.DispatchPending {
+			continue
+		}
+		reason := "outcome_unknown: daemon restarted before prompt submission was confirmed"
+		if _, err := e.st.Fence(d.ID, reason); err != nil {
+			e.logf("recover dispatch %s: %v", d.ID, err)
+			continue
+		}
+		e.messageCoordinatorLocked(d.RunID, store.KindEscalation, "dispatch "+d.ID+" outcome unknown",
+			fmt.Sprintf("Dispatch %s of task %s to %s was fenced: %s. The prompt may have landed. Inspect the pane before resending; nothing was replayed.", d.ID, d.TaskID, d.PaneID, reason), d.TaskID, "")
 	}
 }
 
@@ -216,14 +245,24 @@ func (e *Engine) recomputeWatch() {
 // so transitions missed while disconnected are not lost).
 func (e *Engine) SyncStatuses(ctx context.Context) {
 	for _, p := range e.WatchSet() {
+		e.mu.Lock()
+		seq := e.statusSeq[p]
+		e.mu.Unlock()
 		pane, err := e.h.PaneGet(ctx, p)
-		if err != nil {
-			if herdr.ErrCode(err) == "pane_not_found" || strings.Contains(err.Error(), "not found") {
-				e.HandleEvent(herdr.Event{Name: "pane.closed", Data: mustJSON(map[string]string{"pane_id": p})})
-			}
+		e.mu.Lock()
+		if e.statusSeq[p] != seq {
+			e.mu.Unlock()
 			continue
 		}
-		e.setStatus(p, pane.AgentStatus)
+		if err != nil {
+			if herdr.ErrCode(err) == "pane_not_found" || strings.Contains(err.Error(), "not found") {
+				e.paneGoneLocked(p, "closed")
+			}
+			e.mu.Unlock()
+			continue
+		}
+		e.setStatusLocked(p, pane.AgentStatus)
+		e.mu.Unlock()
 	}
 }
 
@@ -271,7 +310,7 @@ func (e *Engine) isWatched(p string) bool {
 }
 
 func (e *Engine) setStatus(pane, status string) {
-	if pane == "" || status == "" {
+	if pane == "" {
 		return
 	}
 	e.mu.Lock()
@@ -281,9 +320,10 @@ func (e *Engine) setStatus(pane, status string) {
 
 // setStatusLocked reconciles the current status while the caller owns the engine lock.
 func (e *Engine) setStatusLocked(pane, status string) {
-	if pane == "" || status == "" {
+	if pane == "" {
 		return
 	}
+	e.statusSeq[pane]++
 	prev := e.status[pane]
 	if prev == status {
 		return
@@ -326,6 +366,12 @@ func (e *Engine) setStatusLocked(pane, status string) {
 func (e *Engine) paneGone(pane, why string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.paneGoneLocked(pane, why)
+}
+
+func (e *Engine) paneGoneLocked(pane, why string) {
+	e.statusSeq[pane]++
+	e.paneEpoch[pane]++
 	delete(e.status, pane)
 	delete(e.blocked, pane)
 	delete(e.blockedTold, pane)
@@ -418,7 +464,7 @@ func (e *Engine) escalateBlockedLocked() {
 
 // evaluateLocked applies the settlement rule to an active dispatch:
 //
-//   - done message received and the agent is not working/blocked → settle with its outcome
+//   - done message received and the agent stays idle/done for one second → settle
 //   - saw working, now idle for IdleReportAfter, no done message → tell the coordinator
 //     once per idle episode (with the screen tail); the dispatch stays open
 //   - nothing observed for UnobservedAfter → tell the coordinator once (never resend blindly)
@@ -431,8 +477,21 @@ func (e *Engine) evaluateLocked(d store.Dispatch) {
 	}
 	now := e.st.Now().UnixMilli()
 	status := e.status[d.PaneID]
-	busy := status == "working" || status == "blocked"
-	if d.DoneMessageID != "" && !busy {
+	if status != "idle" && status != "done" {
+		delete(e.doneIdleSince, d.ID)
+	}
+	if d.DoneMessageID != "" && (status == "idle" || status == "done") {
+		if d.DoneOutcome != "succeeded" && d.DoneOutcome != "failed" {
+			return
+		}
+		since, hasSince := e.doneIdleSince[d.ID]
+		if !hasSince {
+			e.doneIdleSince[d.ID] = now
+			return
+		}
+		if now-since < time.Second.Milliseconds() {
+			return
+		}
 		result := ""
 		if m, err := e.st.GetMessage(d.DoneMessageID); err == nil {
 			result = m.Body
@@ -517,6 +576,7 @@ func (e *Engine) settleLocked(d store.Dispatch, ok bool, outcome, result string)
 
 func (e *Engine) afterSettleLocked(st store.Settlement) {
 	d, t := st.Dispatch, st.Task
+	delete(e.doneIdleSince, d.ID)
 	delete(e.capChecked, d.ID)
 	switch d.Status {
 	case store.DispatchCompleted:

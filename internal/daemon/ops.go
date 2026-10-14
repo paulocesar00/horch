@@ -453,7 +453,8 @@ func (e *Engine) opCheck(ctx context.Context, caller string, raw json.RawMessage
 			e.mu.Unlock()
 			return nil, err
 		}
-		msgs, err := e.st.Unread([]string{caller}, !a.Peek)
+		// Only ack consumes mail; a lost response must be safe to read again.
+		msgs, err := e.st.Unread([]string{caller}, false)
 		if err == nil && len(msgs) > 0 && !a.Peek {
 			e.badgeMail(caller)
 			e.notify.broadcast()
@@ -790,6 +791,9 @@ func (e *Engine) dispatchTo(ctx context.Context, taskID, pane string) (store.Dis
 	return e.dispatchToWithLeases(ctx, taskID, pane, nil)
 }
 func (e *Engine) dispatchToWithLeases(ctx context.Context, taskID, pane string, resources []string) (store.Dispatch, error) {
+	e.mu.Lock()
+	seq := e.statusSeq[pane]
+	e.mu.Unlock()
 	info, err := e.h.PaneGet(ctx, pane)
 	if err != nil {
 		return store.Dispatch{}, refusal("unknown_pane", "pane %s: %v", pane, err)
@@ -799,12 +803,30 @@ func (e *Engine) dispatchToWithLeases(ctx context.Context, taskID, pane string, 
 		return store.Dispatch{}, refusal("worker_busy", "pane %s is working; wait for it to go idle", pane)
 	case "blocked":
 		return store.Dispatch{}, refusal("agent_blocked", "pane %s is blocked at a prompt; resolve that first", pane)
+	case "idle", "done":
+	default:
+		return store.Dispatch{}, refusal("agent_not_ready", "pane %s has no observed idle/done status", pane)
+	}
+	if info.InteractiveReady != nil && !*info.InteractiveReady {
+		return store.Dispatch{}, refusal("agent_not_ready", "pane %s has no interactive agent", pane)
 	}
 	agent := ""
 	if info.Agent != nil {
 		agent = *info.Agent
 	}
 	e.mu.Lock()
+	if e.statusSeq[pane] != seq {
+		e.mu.Unlock()
+		return store.Dispatch{}, refusal("worker_state_changed", "pane %s changed state while checking readiness; retry after inspecting it", pane)
+	}
+	switch e.status[pane] {
+	case "working":
+		e.mu.Unlock()
+		return store.Dispatch{}, refusal("worker_busy", "pane %s is observed working; wait for it to go idle", pane)
+	case "blocked":
+		e.mu.Unlock()
+		return store.Dispatch{}, refusal("agent_blocked", "pane %s is observed blocked; resolve that first", pane)
+	}
 	if e.st.WorkerLifecycleHeld(pane) {
 		e.mu.Unlock()
 		return store.Dispatch{}, refusal("worker_lifecycle_busy", "worker is held for a lifecycle operation")
@@ -830,7 +852,9 @@ func (e *Engine) dispatchToWithLeases(ctx context.Context, taskID, pane string, 
 	sum := sha256.Sum256([]byte(prompt))
 	d, err := e.st.BeginDispatchWithLeases(taskID, pane, agent, hex.EncodeToString(sum[:8]), resources, store.DefaultLeaseTTL)
 	if err == nil {
-		e.status[pane] = info.AgentStatus
+		// Readiness before submission is not completion evidence for this prompt.
+		e.statusSeq[pane]++
+		delete(e.status, pane)
 		_ = e.st.SetFlagged(pane, 0)
 		e.recomputeWatch()
 	}
@@ -872,6 +896,10 @@ func (e *Engine) dispatchToWithLeases(ctx context.Context, taskID, pane string, 
 	e.notify.broadcast()
 	d, err = e.st.GetDispatch(d.ID)
 	if err == nil {
+		if !d.SawWorking && (e.status[pane] == "idle" || e.status[pane] == "done") {
+			e.statusSeq[pane]++
+			delete(e.status, pane)
+		}
 		e.evaluateLocked(d)
 	}
 	return d, err
@@ -902,6 +930,13 @@ func (e *Engine) submit(ctx context.Context, pane, prompt string) (string, error
 			}
 		}
 		return "", err
+	}
+	ready, readyErr := e.readyPane(ctx, pane)
+	if readyErr != nil {
+		return "", readyErr
+	}
+	if !ready {
+		return "", &herdr.Error{Code: "agent_not_ready", Message: "agent is no longer idle and ready"}
 	}
 	flat := strings.Join(strings.Fields(strings.ReplaceAll(prompt, "\n", " ")), " ")
 	if err2 := e.h.SendText(ctx, pane, flat); err2 != nil {

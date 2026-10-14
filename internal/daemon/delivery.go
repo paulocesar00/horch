@@ -177,13 +177,18 @@ func (e *Engine) awaitReady(ctx context.Context, m store.Message) error {
 	}
 }
 
-func (e *Engine) workingGeneration(pane string) uint64 {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.workingSeq[pane]
+type pickupGeneration struct {
+	working uint64
+	epoch   uint64
 }
 
-func (e *Engine) awaitPickup(ctx context.Context, m store.Message, seq uint64) bool {
+func (e *Engine) workingGeneration(pane string) pickupGeneration {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return pickupGeneration{working: e.workingSeq[pane], epoch: e.paneEpoch[pane]}
+}
+
+func (e *Engine) awaitPickup(ctx context.Context, m store.Message, seq pickupGeneration) bool {
 	ctx, cancel := context.WithTimeout(ctx, e.deliveryPickup)
 	defer cancel()
 	timer := time.NewTimer(e.deliveryPickup)
@@ -201,19 +206,25 @@ func (e *Engine) awaitPickup(ctx context.Context, m store.Message, seq uint64) b
 		if ctx.Err() != nil {
 			return false
 		}
-		if e.st.WorkerLifecycleHeld(m.To) {
+		e.mu.Lock()
+		if e.paneEpoch[m.To] != seq.epoch || e.st.WorkerLifecycleHeld(m.To) || ctx.Err() != nil {
+			e.mu.Unlock()
 			return false
 		}
-		if e.workingGeneration(m.To) > seq || (err == nil && p.AgentStatus == "working") {
+		if e.workingSeq[m.To] > seq.working || (err == nil && p.AgentStatus == "working") {
 			if e.st.Delivered(m.ID) != nil {
+				e.mu.Unlock()
 				return false
 			}
 			if e.st.PickedUp(m.ID, "working") != nil {
+				e.mu.Unlock()
 				return false
 			}
+			e.mu.Unlock()
 			e.notify.broadcast()
 			return true
 		}
+		e.mu.Unlock()
 		select {
 		case <-ctx.Done():
 			return false
@@ -226,9 +237,9 @@ func (e *Engine) awaitPickup(ctx context.Context, m store.Message, seq uint64) b
 
 // pendingComposer recognizes common Claude and Codex collapsed-paste indicators.
 // A retry submits the existing composer instead of pasting a duplicate message.
-func pendingComposer(screen, id string) bool {
+func pendingComposer(screen string) bool {
 	s := strings.ToLower(screen)
-	return strings.Contains(s, "paste again to expand") || strings.Contains(s, "[pasted text") || strings.Contains(s, "[pasted content") || strings.Contains(s, "[paste #") || strings.Contains(screen, "[horch message "+id+"]")
+	return strings.Contains(s, "paste again to expand") || strings.Contains(s, "[pasted text") || strings.Contains(s, "[pasted content") || strings.Contains(s, "[paste #")
 }
 
 type pendingSubmitter interface {
@@ -237,6 +248,7 @@ type pendingSubmitter interface {
 
 func (e *Engine) deliverMessage(ctx context.Context, m store.Message) {
 	prompt := fmt.Sprintf("[horch message %s] from %s\n%s\n%s\n\nAcknowledge receipt with: %s ack --id %s", m.ID, m.From, m.Subject, m.Body, e.horchCmd(m.To), m.ID)
+	epoch := e.workingGeneration(m.To).epoch
 	reason := "pickup not observed after two attempts"
 	for attempt := 0; attempt < 2; attempt++ {
 		if ctx.Err() != nil {
@@ -255,6 +267,10 @@ func (e *Engine) deliverMessage(ctx context.Context, m store.Message) {
 			return
 		}
 		seq := e.workingGeneration(m.To)
+		if seq.epoch != epoch {
+			reason = "pane exited during delivery; inspect it before resending"
+			break
+		}
 		attempted, err := e.st.DeliveryAttempt(m.ID)
 		if err != nil {
 			return
@@ -270,7 +286,11 @@ func (e *Engine) deliverMessage(ctx context.Context, m store.Message) {
 				reason = "cannot inspect composer before retry: " + err.Error()
 				break
 			}
-			if pendingComposer(screen, m.ID) {
+			if strings.Contains(screen, "[horch message "+m.ID+"]") {
+				reason = "message marker is already visible; inspect the pane before resending"
+				break
+			}
+			if pendingComposer(screen) {
 				if sender, ok := e.h.(pendingSubmitter); ok {
 					sendErr = sender.SubmitPending(ctx, m.To)
 				} else {
@@ -293,6 +313,10 @@ func (e *Engine) deliverMessage(ctx context.Context, m store.Message) {
 		// A transport error can follow a successful write. Observe pickup before retrying.
 		if e.awaitPickup(ctx, m, seq) {
 			return
+		}
+		if e.workingGeneration(m.To).epoch != epoch {
+			reason = "pane exited during delivery; inspect it before resending"
+			break
 		}
 	}
 	if ctx.Err() == nil {

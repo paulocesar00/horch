@@ -318,6 +318,7 @@ func TestDispatchSettlesOnDonePlusIdle(t *testing.T) {
 		t.Fatalf("settled while working: %s", got)
 	}
 	x.status("w1:p2", "idle")
+	x.advance(time.Second)
 	tk := x.task(task.ID)
 	if tk.Status != store.TaskCompleted || tk.Result != "did A" {
 		t.Fatalf("task: %+v", tk)
@@ -363,6 +364,7 @@ func TestIdleWithoutReportEscalatesNeverFails(t *testing.T) {
 	}
 	// Late report still settles normally.
 	x.mustOp("w1:p2", "send", SendArgs{Kind: store.KindDone, Body: "loop finished"}, nil)
+	x.advance(time.Second)
 	if tk := x.task(task.ID); tk.Status != store.TaskCompleted || tk.Result != "loop finished" {
 		t.Fatalf("late report: %+v", tk)
 	}
@@ -519,6 +521,7 @@ func TestDoneFailedAndCircuitBreaker(t *testing.T) {
 		x.status("w1:p2", "working")
 		x.mustOp("w1:p2", "send", SendArgs{Kind: store.KindDone, Failed: true, Body: "tests fail"}, nil)
 		x.status("w1:p2", "idle")
+		x.advance(time.Second)
 	}
 	ds, _ := x.st.DispatchesForTask(task.ID)
 	if ds[0].Status != store.DispatchFailed || ds[1].Status != store.DispatchCircuitBroken {

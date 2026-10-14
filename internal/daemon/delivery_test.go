@@ -268,7 +268,7 @@ func (h *deadlinePickupHerdr) PaneGet(ctx context.Context, pane string) (herdr.P
 func TestPickupRejectsWorkingEvidenceAfterDeadline(t *testing.T) {
 	x, _, m := setupDelivery(t)
 	x.e.h = &deadlinePickupHerdr{fakeHerdr: x.h, engine: x.e}
-	if x.e.awaitPickup(context.Background(), m, 0) {
+	if x.e.awaitPickup(context.Background(), m, x.e.workingGeneration(m.To)) {
 		t.Fatal("accepted working event after deadline")
 	}
 	got, _ := x.st.GetMessage(m.ID)
@@ -298,5 +298,52 @@ func TestDeliveryDoesNotTypeDuringWorkerLifecycle(t *testing.T) {
 	}
 	if h.sends != 0 {
 		t.Fatal("typed during restart")
+	}
+}
+
+func TestPickupDoesNotUseWorkingFromReusedPane(t *testing.T) {
+	x, _, m := setupDelivery(t)
+	x.e.setStatus(m.To, "working")
+	x.e.setStatus(m.To, "idle")
+	seq := x.e.workingGeneration(m.To)
+	x.e.paneGone(m.To, "exited")
+	x.e.setStatus(m.To, "working")
+	if x.e.awaitPickup(context.Background(), m, seq) {
+		t.Fatal("new agent activity confirmed old agent's delivery")
+	}
+	got, err := x.st.GetMessage(m.ID)
+	if err != nil || picked(got) {
+		t.Fatalf("old receipt: %+v err=%v", got, err)
+	}
+}
+
+type exitingDeliveryHerdr struct {
+	*deliveryHerdr
+	engine *Engine
+}
+
+func (h *exitingDeliveryHerdr) AgentPrompt(ctx context.Context, pane, text string) error {
+	err := h.deliveryHerdr.AgentPrompt(ctx, pane, text)
+	h.engine.paneGone(pane, "exited")
+	return err
+}
+
+func TestDeliveryDoesNotRetryIntoReusedPane(t *testing.T) {
+	x, h, m := setupDelivery(t)
+	x.e.h = &exitingDeliveryHerdr{deliveryHerdr: h, engine: x.e}
+	x.e.deliverMessage(context.Background(), m)
+	got, err := x.st.GetMessage(m.ID)
+	if err != nil || h.sends != 1 || got.DeliveryStatus != "undelivered" || picked(got) {
+		t.Fatalf("replayed after pane exit: sends=%d receipt=%+v err=%v", h.sends, got, err)
+	}
+}
+
+func TestDeliveryDoesNotResubmitVisibleMessageMarker(t *testing.T) {
+	x, h, m := setupDelivery(t)
+	h.screen = "conversation history\n[horch message " + m.ID + "] from w1:p1\n"
+	x.e.deliverMessage(context.Background(), m)
+	got, err := x.st.GetMessage(m.ID)
+	if err != nil || h.sends != 1 || h.submits != 0 || picked(got) {
+		t.Fatalf("resubmitted visible message: sends=%d submits=%d status=%s err=%v", h.sends, h.submits, got.DeliveryStatus, err)
 	}
 }
