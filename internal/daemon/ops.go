@@ -19,10 +19,6 @@ type Handler func(ctx context.Context, caller string, args json.RawMessage) (any
 // Ops returns the op table served on orch.sock.
 func (e *Engine) Ops() map[string]Handler {
 	return map[string]Handler{
-		"lease.acquire":   e.opLeaseAcquire,
-		"lease.release":   e.opLeaseRelease,
-		"lease.list":      e.opLeaseList,
-		"sweep":           e.opProcessSweep,
 		"run.create":      e.opRunCreate,
 		"run.use":         e.opRunUse,
 		"run.current":     e.opRunCurrent,
@@ -44,42 +40,10 @@ func (e *Engine) Ops() map[string]Handler {
 		"dispatch.next":   e.opDispatchNext,
 		"dispatch.nudge":  e.opDispatchNudge,
 		"dispatch.fail":   e.opDispatchFail,
-		"dispatch.hold":   e.opDispatchHold,
-		"dispatch.resume": e.opDispatchResume,
-		"gate.create":     e.opGateCreate,
-		"gate.resolve":    e.opGateResolve,
-		"gate.list":       e.opGateList,
-		"worker.start":    e.opWorkerStart,
-		"worker.restart":  e.opWorkerRestart,
 		"worker.show":     e.opWorkerShow,
 		"worker.read":     e.opWorkerRead,
 		"worker.list":     e.opWorkerList,
-		"worker.stop":     e.opWorkerStop,
-		"worker.release":  e.opWorkerRelease,
-		"worker.abandon":  e.opWorkerAbandon,
-		"worker.retain":   e.opWorkerRetain,
 		"worker.register": e.opWorkerRegister,
-		"schedule.add":    e.opScheduleAdd,
-		"schedule.list":   e.opScheduleList,
-		"schedule.rm":     e.opScheduleRm,
-		"schedule.run":    e.opScheduleRun,
-		"schedule.enable": e.opScheduleEnable,
-		"board":           e.opBoard,
-		"web.activity":    e.opWebActivity,
-
-		"plan.import":       e.opPlanImport,
-		"plan.show":         e.opPlanShow,
-		"plan.item.add":     e.planItemOp("add"),
-		"plan.item.update":  e.planItemOp("update"),
-		"plan.item.move":    e.planItemOp("move"),
-		"plan.item.hold":    e.planItemOp("hold"),
-		"plan.item.release": e.planItemOp("release"),
-		"plan.item.remove":  e.planItemOp("remove"),
-		"plan.transition":   e.planItemOp("transition"),
-		"plan.status":       e.opPlanStatus,
-		"plan.events":       e.opPlanEvents,
-		"plan.export":       e.opPlanExport,
-		"plan.config":       e.opPlanConfig,
 	}
 }
 
@@ -89,9 +53,7 @@ type StreamHandler func(ctx context.Context, caller string, args json.RawMessage
 
 // Streams returns the streaming ops served on orch.sock.
 func (e *Engine) Streams() map[string]StreamHandler {
-	return map[string]StreamHandler{
-		"plan.subscribe": e.streamPlanEvents,
-	}
+	return map[string]StreamHandler{}
 }
 
 func decode[T any](raw json.RawMessage) (T, error) {
@@ -116,10 +78,9 @@ func (e *Engine) runFor(caller, run string) (store.Run, error) {
 // ---------- runs ----------
 
 type RunCreateArgs struct {
-	Title        string `json:"title"`
-	Coordinator  string `json:"coordinator,omitempty"`
-	AutoDispatch bool   `json:"auto_dispatch,omitempty"`
-	MaxAttempts  int    `json:"max_attempts,omitempty"`
+	Title       string `json:"title"`
+	Coordinator string `json:"coordinator,omitempty"`
+	MaxAttempts int    `json:"max_attempts,omitempty"`
 }
 
 func (e *Engine) opRunCreate(_ context.Context, caller string, raw json.RawMessage) (any, error) {
@@ -141,13 +102,10 @@ func (e *Engine) opRunCreate(_ context.Context, caller string, raw json.RawMessa
 		return nil, err
 	}
 	u := store.RunUpdate{}
-	if a.AutoDispatch {
-		u.AutoDispatch = &a.AutoDispatch
-	}
 	if a.MaxAttempts > 0 {
 		u.MaxAttempts = &a.MaxAttempts
 	}
-	if u.AutoDispatch != nil || u.MaxAttempts != nil {
+	if u.MaxAttempts != nil {
 		r, err = e.st.UpdateRun(r.ID, u)
 	}
 	e.notify.broadcast()
@@ -185,7 +143,6 @@ func (e *Engine) opRunList(context.Context, string, json.RawMessage) (any, error
 type RunShow struct {
 	Run        store.Run        `json:"run"`
 	Tasks      []store.Task     `json:"tasks"`
-	Gates      []store.Gate     `json:"gates"`
 	Workers    []store.Worker   `json:"workers"`
 	Dispatches []store.Dispatch `json:"active_dispatches"`
 }
@@ -208,9 +165,6 @@ func (e *Engine) runShow(r store.Run) (RunShow, error) {
 	if out.Tasks, err = e.st.ListTasks(r.ID); err != nil {
 		return out, err
 	}
-	if out.Gates, err = e.st.ListGates(r.ID, false); err != nil {
-		return out, err
-	}
 	if out.Workers, err = e.st.ListWorkers(r.ID, false); err != nil {
 		return out, err
 	}
@@ -228,16 +182,12 @@ func (e *Engine) runShow(r store.Run) (RunShow, error) {
 }
 
 type RunUpdateArgs struct {
-	Run          string   `json:"run,omitempty"`
-	Status       *string  `json:"status,omitempty"`
-	Coordinator  *string  `json:"coordinator,omitempty"`
-	AutoDispatch *bool    `json:"auto_dispatch,omitempty"`
-	MaxAttempts  *int     `json:"max_attempts,omitempty"`
-	Title        *string  `json:"title,omitempty"`
-	IdleReportMS *int64   `json:"idle_report_ms,omitempty"`
-	IdleFlagMS   *int64   `json:"idle_flag_ms,omitempty"`
-	MaxLoad      *float64 `json:"max_load,omitempty"`
-	MinFreeMem   *float64 `json:"min_free_mem,omitempty"`
+	Run          string  `json:"run,omitempty"`
+	Status       *string `json:"status,omitempty"`
+	Coordinator  *string `json:"coordinator,omitempty"`
+	MaxAttempts  *int    `json:"max_attempts,omitempty"`
+	Title        *string `json:"title,omitempty"`
+	IdleReportMS *int64  `json:"idle_report_ms,omitempty"`
 }
 
 func (e *Engine) opRunUpdate(_ context.Context, caller string, raw json.RawMessage) (any, error) {
@@ -254,12 +204,9 @@ func (e *Engine) opRunUpdate(_ context.Context, caller string, raw json.RawMessa
 	if a.Coordinator != nil && *a.Coordinator == "me" {
 		*a.Coordinator = caller
 	}
-	r, err = e.st.UpdateRun(r.ID, store.RunUpdate{Status: a.Status, Coordinator: a.Coordinator, AutoDispatch: a.AutoDispatch, MaxAttempts: a.MaxAttempts, Title: a.Title, IdleReportMS: a.IdleReportMS, IdleFlagMS: a.IdleFlagMS, MaxLoad: a.MaxLoad, MinFreeMem: a.MinFreeMem})
+	r, err = e.st.UpdateRun(r.ID, store.RunUpdate{Status: a.Status, Coordinator: a.Coordinator, MaxAttempts: a.MaxAttempts, Title: a.Title, IdleReportMS: a.IdleReportMS})
 	if err != nil {
 		return nil, err
-	}
-	if a.AutoDispatch != nil && *a.AutoDispatch {
-		e.autoDispatchLocked(r.ID)
 	}
 	e.notify.broadcast()
 	return r, nil
@@ -391,9 +338,6 @@ func (e *Engine) done(caller string, a SendArgs) (any, error) {
 		if err != nil {
 			return nil, refusal("no_active_dispatch", "pane %s has no active dispatch; pass --task", caller)
 		}
-	}
-	if e.st.WorkerLifecycleHeld(d.PaneID) {
-		return nil, refusal("worker_lifecycle_busy", "worker is held for a lifecycle operation")
 	}
 	outcome := "succeeded"
 	if a.Failed {
@@ -633,7 +577,6 @@ func (e *Engine) opTaskCreate(_ context.Context, caller string, raw json.RawMess
 		return nil, err
 	}
 	if t.Status == store.TaskReady {
-		e.autoDispatchLocked(run.ID)
 		t, _ = e.st.GetTask(t.ID)
 	}
 	e.notify.broadcast()
@@ -689,13 +632,9 @@ func (e *Engine) opTaskUpdate(_ context.Context, _ string, raw json.RawMessage) 
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	t, ready, err := e.st.UpdateTask(a.ID, store.TaskUpdate{Title: a.Title, Spec: a.Spec, Status: a.Status, Result: a.Result, Deps: a.Deps, ResetAttempts: a.ResetAttempts})
+	t, _, err := e.st.UpdateTask(a.ID, store.TaskUpdate{Title: a.Title, Spec: a.Spec, Status: a.Status, Result: a.Result, Deps: a.Deps, ResetAttempts: a.ResetAttempts})
 	if err != nil {
 		return nil, err
-	}
-	if len(ready) > 0 {
-		e.autoDispatchLocked(t.RunID)
-		t, _ = e.st.GetTask(t.ID)
 	}
 	e.notify.broadcast()
 	return t, nil
@@ -704,15 +643,11 @@ func (e *Engine) opTaskUpdate(_ context.Context, _ string, raw json.RawMessage) 
 // ---------- dispatch ----------
 
 type DispatchArgs struct {
-	Leases []string `json:"leases,omitempty"`
-	Run    string   `json:"run,omitempty"`
-	Task   string   `json:"task,omitempty"`
-	To     string   `json:"to"`
-	Title  string   `json:"title,omitempty"`
-	Spec   string   `json:"spec,omitempty"`
-	// For --to new:<agent>.
-	Cwd  string `json:"cwd,omitempty"`
-	Name string `json:"name,omitempty"`
+	Run   string `json:"run,omitempty"`
+	Task  string `json:"task,omitempty"`
+	To    string `json:"to"`
+	Title string `json:"title,omitempty"`
+	Spec  string `json:"spec,omitempty"`
 }
 
 func (e *Engine) opDispatch(ctx context.Context, caller string, raw json.RawMessage) (any, error) {
@@ -720,13 +655,11 @@ func (e *Engine) opDispatch(ctx context.Context, caller string, raw json.RawMess
 	if err != nil {
 		return nil, err
 	}
-	for _, resource := range a.Leases {
-		if _, err := store.NormalizeResource(resource); err != nil {
-			return nil, err
-		}
-	}
 	if a.To == "" {
 		return nil, refusal("bad_args", "--to is required")
+	}
+	if strings.HasPrefix(a.To, "new:") {
+		return nil, refusal("bad_args", "dispatch requires an existing worker pane; register it first")
 	}
 	run, err := e.runFor(caller, a.Run)
 	if err != nil {
@@ -758,39 +691,19 @@ func (e *Engine) opDispatch(ctx context.Context, caller string, raw json.RawMess
 	if t.Status != store.TaskReady {
 		return nil, refusal("task_not_ready", "task %s is %s, not ready", t.ID, t.Status)
 	}
-	var pane string
-	if kind, ok := strings.CutPrefix(a.To, "new:"); ok {
-		run, err := e.st.GetRun(t.RunID)
-		if err != nil {
-			return nil, err
-		}
-		if err := e.checkAdmission(ctx, run); err != nil {
-			return nil, err
-		}
-		w, err := e.startWorker(ctx, caller, WorkerStartArgs{Run: t.RunID, Agent: kind, Cwd: a.Cwd, Name: a.Name})
-		if err != nil {
-			return nil, err
-		}
-		pane = w.PaneID
-	} else {
-		to, err := e.resolveRecipients(ctx, caller, run, a.To)
-		if err != nil {
-			return nil, err
-		}
-		if len(to) != 1 || !isPane(to[0]) {
-			return nil, refusal("bad_args", "dispatch needs a single worker pane")
-		}
-		pane = to[0]
+	to, err := e.resolveRecipients(ctx, caller, run, a.To)
+	if err != nil {
+		return nil, err
 	}
-	return e.dispatchToWithLeases(ctx, t.ID, pane, a.Leases)
+	if len(to) != 1 || !isPane(to[0]) {
+		return nil, refusal("bad_args", "dispatch needs a single worker pane")
+	}
+	return e.dispatchTo(ctx, t.ID, to[0])
 }
 
 // dispatchTo claims the task, submits the prompt and marks the dispatch sent. A failed
 // submission fences the dispatch (the attempt is not counted) and refuses.
 func (e *Engine) dispatchTo(ctx context.Context, taskID, pane string) (store.Dispatch, error) {
-	return e.dispatchToWithLeases(ctx, taskID, pane, nil)
-}
-func (e *Engine) dispatchToWithLeases(ctx context.Context, taskID, pane string, resources []string) (store.Dispatch, error) {
 	e.mu.Lock()
 	seq := e.statusSeq[pane]
 	e.mu.Unlock()
@@ -827,35 +740,18 @@ func (e *Engine) dispatchToWithLeases(ctx context.Context, taskID, pane string, 
 		e.mu.Unlock()
 		return store.Dispatch{}, refusal("agent_blocked", "pane %s is observed blocked; resolve that first", pane)
 	}
-	if e.st.WorkerLifecycleHeld(pane) {
-		e.mu.Unlock()
-		return store.Dispatch{}, refusal("worker_lifecycle_busy", "worker is held for a lifecycle operation")
-	}
 	t, err := e.st.GetTask(taskID)
-	if err != nil {
-		e.mu.Unlock()
-		return store.Dispatch{}, err
-	}
-	if e.closing[pane] {
-		e.mu.Unlock()
-		return store.Dispatch{}, refusal("worker_closing", "worker %s is being released", pane)
-	}
-	run, err := e.st.GetRun(t.RunID)
-	if err == nil {
-		err = e.checkAdmission(ctx, run)
-	}
 	if err != nil {
 		e.mu.Unlock()
 		return store.Dispatch{}, err
 	}
 	prompt := buildPrompt(t, "", e.horchCmd(pane))
 	sum := sha256.Sum256([]byte(prompt))
-	d, err := e.st.BeginDispatchWithLeases(taskID, pane, agent, hex.EncodeToString(sum[:8]), resources, store.DefaultLeaseTTL)
+	d, err := e.st.BeginDispatch(taskID, pane, agent, hex.EncodeToString(sum[:8]))
 	if err == nil {
 		// Readiness before submission is not completion evidence for this prompt.
 		e.statusSeq[pane]++
 		delete(e.status, pane)
-		_ = e.st.SetFlagged(pane, 0)
 		e.recomputeWatch()
 	}
 	e.mu.Unlock()
@@ -869,20 +765,10 @@ func (e *Engine) dispatchToWithLeases(ctx context.Context, taskID, pane string, 
 	defer e.mu.Unlock()
 	if sendErr != nil {
 		code := herdr.ErrCode(sendErr)
-		var st store.Settlement
-		var ferr error
-		switch code {
-		case "agent_not_ready", "agent_blocked", "agent_busy":
-			st, ferr = e.st.FenceUnsent(d.ID, "prompt rejected: "+sendErr.Error())
-		default:
-			// A timeout or transport error can follow delivery. Keep resource leases
-			// until the coordinator verifies release or their explicit TTL expires.
-			st, ferr = e.st.Fence(d.ID, "prompt delivery uncertain: "+sendErr.Error())
-		}
+		_, ferr := e.st.Fence(d.ID, "prompt delivery failed or uncertain: "+sendErr.Error())
 		if ferr == nil {
 			e.recomputeWatch()
 			e.notify.broadcast()
-			_ = st
 		}
 		if code == "" {
 			code = "send_failed"
@@ -1039,7 +925,7 @@ func (e *Engine) opDispatchNext(ctx context.Context, caller string, raw json.Raw
 	return e.dispatchNext(ctx, run.ID)
 }
 
-// idleWorkersLocked lists live, unretained workers in run with no active dispatch whose
+// idleWorkersLocked lists live workers in run with no active dispatch whose
 // agent is ready.
 func (e *Engine) idleWorkersLocked(run string) []store.Worker {
 	ws, err := e.st.ListWorkers(run, true)
@@ -1048,8 +934,7 @@ func (e *Engine) idleWorkersLocked(run string) []store.Worker {
 	}
 	var out []store.Worker
 	for _, w := range ws {
-		if w.State != store.WorkerLive || w.Retained || w.Lifecycle != "" {
-			// Retained workers (e.g. a PR owner waiting on its merge) are reserved.
+		if w.State != store.WorkerLive {
 			continue
 		}
 		if _, err := e.st.ActiveDispatchForPane(w.PaneID); err == nil {
@@ -1081,20 +966,6 @@ func (e *Engine) dispatchNext(ctx context.Context, run string) ([]store.Dispatch
 		out = append(out, d)
 	}
 	return out, nil
-}
-
-// autoDispatchLocked schedules dispatchNext for runs with auto_dispatch on. It runs
-// asynchronously because dispatching calls herdr and takes the engine lock itself.
-func (e *Engine) autoDispatchLocked(run string) {
-	r, err := e.st.GetRun(run)
-	if err != nil || !r.AutoDispatch || r.Status != store.RunRunning {
-		return
-	}
-	e.async(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_, _ = e.dispatchNext(ctx, run)
-	})
 }
 
 type DispatchActArgs struct {
@@ -1131,11 +1002,7 @@ func (e *Engine) opDispatchNudge(ctx context.Context, _ string, raw json.RawMess
 	e.mu.Lock()
 	d, err := e.activeDispatchForTask(a.Task)
 	status := e.status[d.PaneID]
-	held := e.st.WorkerLifecycleHeld(d.PaneID)
 	e.mu.Unlock()
-	if held {
-		return nil, refusal("worker_lifecycle_busy", "worker is held for a lifecycle operation")
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -1185,9 +1052,6 @@ func (e *Engine) opDispatchFail(_ context.Context, caller string, raw json.RawMe
 	if err != nil {
 		return nil, err
 	}
-	if e.st.WorkerLifecycleHeld(d.PaneID) {
-		return nil, refusal("worker_lifecycle_busy", "worker is held for a lifecycle operation")
-	}
 	var st store.Settlement
 	if a.Infra {
 		st, err = e.st.Fence(d.ID, "infrastructure: "+a.Reason+" (by "+caller+")")
@@ -1200,137 +1064,4 @@ func (e *Engine) opDispatchFail(_ context.Context, caller string, raw json.RawMe
 	e.logf("dispatch %s failed by %s: %s", d.ID, caller, a.Reason)
 	e.afterSettleLocked(st)
 	return st, nil
-}
-
-// ---------- gates ----------
-
-type GateCreateArgs struct {
-	Run       string   `json:"run,omitempty"`
-	Task      string   `json:"task,omitempty"`
-	Question  string   `json:"question"`
-	Options   []string `json:"options,omitempty"`
-	TimeoutMS int64    `json:"timeout_ms,omitempty"`
-}
-
-func (e *Engine) opGateCreate(_ context.Context, caller string, raw json.RawMessage) (any, error) {
-	a, err := decode[GateCreateArgs](raw)
-	if err != nil {
-		return nil, err
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	runID := ""
-	if a.Task == "" {
-		run, err := e.runFor(caller, a.Run)
-		if err != nil {
-			return nil, err
-		}
-		runID = run.ID
-	}
-	var timeoutAt int64
-	if a.TimeoutMS > 0 {
-		timeoutAt = e.st.Now().Add(time.Duration(a.TimeoutMS) * time.Millisecond).UnixMilli()
-	}
-	g, err := e.st.CreateGate(runID, a.Task, a.Question, a.Options, timeoutAt)
-	if err != nil {
-		return nil, err
-	}
-	opts := ""
-	if len(g.Options) > 0 {
-		opts = " [" + strings.Join(g.Options, "/") + "]"
-	}
-	e.async(func() {
-		ctx, cancel := bg()
-		defer cancel()
-		_ = e.h.Notify(ctx, "horch: decision needed ("+g.ID+")", g.Question+opts, true)
-	})
-	e.notify.broadcast()
-	return g, nil
-}
-
-type GateResolveArgs struct {
-	ID       string `json:"id"`
-	Decision string `json:"decision"`
-}
-
-func (e *Engine) opGateResolve(_ context.Context, caller string, raw json.RawMessage) (any, error) {
-	a, err := decode[GateResolveArgs](raw)
-	if err != nil {
-		return nil, err
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	g, ready, err := e.st.ResolveGate(a.ID, a.Decision, caller)
-	if err != nil {
-		return nil, err
-	}
-	body := fmt.Sprintf("Gate %s (%q) resolved by %s: %s.", g.ID, g.Question, caller, g.Decision)
-	if g.TaskID != "" {
-		t, _ := e.st.GetTask(g.TaskID)
-		body += fmt.Sprintf(" Task %s is now %s.", t.ID, t.Status)
-	}
-	e.messageCoordinatorLocked(g.RunID, store.KindNote, "gate "+g.ID+" resolved: "+g.Decision, body, g.TaskID, "")
-	if len(ready) > 0 {
-		e.autoDispatchLocked(g.RunID)
-	}
-	e.notify.broadcast()
-	return g, nil
-}
-
-type GateListArgs struct {
-	Run string `json:"run,omitempty"`
-	All bool   `json:"all,omitempty"`
-}
-
-func (e *Engine) opGateList(_ context.Context, _ string, raw json.RawMessage) (any, error) {
-	a, err := decode[GateListArgs](raw)
-	if err != nil {
-		return nil, err
-	}
-	return e.st.ListGates(a.Run, !a.All)
-}
-
-// ---------- board ----------
-
-type Board struct {
-	Runs     []store.Run       `json:"runs"`
-	Selected *RunShow          `json:"selected,omitempty"`
-	Pending  []store.Gate      `json:"pending_gates"`
-	Messages []store.Message   `json:"messages"`
-	Status   map[string]string `json:"status"`
-}
-
-func (e *Engine) opBoard(_ context.Context, caller string, raw json.RawMessage) (any, error) {
-	a, err := decode[RunRef](raw)
-	if err != nil {
-		return nil, err
-	}
-	b := Board{}
-	if b.Runs, err = e.st.ListRuns(); err != nil {
-		return nil, err
-	}
-	var run store.Run
-	if a.Run != "" {
-		run, err = e.st.GetRun(a.Run)
-	} else {
-		run, err = e.st.CurrentRun(caller)
-	}
-	if err == nil {
-		rs, err := e.runShow(run)
-		if err != nil {
-			return nil, err
-		}
-		b.Selected = &rs
-		b.Messages, _ = e.st.RecentMessages(run.ID, 20)
-	} else {
-		b.Messages, _ = e.st.RecentMessages("", 20)
-	}
-	b.Pending, _ = e.st.ListGates("", true)
-	e.mu.Lock()
-	b.Status = map[string]string{}
-	for k, v := range e.status {
-		b.Status[k] = v
-	}
-	e.mu.Unlock()
-	return b, nil
 }

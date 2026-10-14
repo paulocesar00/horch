@@ -79,7 +79,8 @@ Consequences for the daemon:
   then takes the lock (`flock`). The newest instance always wins, since it is the one
   attached to the live server.
 - **Self-exit** when the herdr socket stays unreachable (server stopped).
-- The CLI respawns the daemon if `orch.sock` is dead.
+- Only the herdr plugin starts the daemon. A CLI with a dead socket returns
+  `daemon_not_running`; it does not spawn a replacement.
 
 Startup environment:
 
@@ -101,41 +102,6 @@ HERDR_SOCKET_PATH=~/.config/herdr/sessions/orchtest/herdr.sock
   `orch.sock`, `orch.lock`).
 - Agent panes do not get `HERDR_SESSION`, only `HERDR_SOCKET_PATH`. `horch` derives the
   session from the socket path (`.../sessions/<name>/herdr.sock` → `<name>`, else `default`).
-
-## Process cleanup
-
-`pane.process_info` returns `shell_pid` and `foreground_processes[].pid`. After
-`pane.close` on claude, pi and codex panes, all 9 recorded pids were gone within 2s.
-Release verifies this the same way: record pids, close, poll `kill(pid, 0)`.
-
-## Worktree shell selection
-
-The fields below were checked against the **bundled herdr 0.9.3 protocol 22 schema**
-on 2026-10-13 with `herdr api schema`. Local tests use synthetic socket fixtures;
-this change has not been tested against a running herdr server.
-
-- `workspace.list` returns `workspaces[].worktree.checkout_path`. Worktree metadata
-  can be null; labels, IDs, and sidebar order do not identify a checkout.
-- `worktree.open` accepts `path`, `cwd`, and `focus`. Its returned `workspace` must
-  identify the requested checkout. Its `root_pane` is not assumed to be a shell.
-- `pane.list` takes `workspace_id`. The schema has no pane kind field. Shell
-  selection therefore checks `pane.process_info`: a positive `shell_pid` and
-  foreground processes/group belonging only to that shell establish availability.
-  Missing process information, widgets, agents, and foreground commands are skipped.
-- The schema does not enumerate API error codes. A structured server refusal to
-  inspect a candidate's processes makes that candidate unavailable; transport,
-  cancellation, and decoding failures stop selection. No widget error code is assumed.
-- A new `tab.create` root is checked for a positive shell PID, with a one-second
-  bounded wait that respects cancellation, before agent startup. A failed shell
-  check closes only the newly created pane. Reused shells are kept on startup failure.
-- `pane.get` with a missing/null workspace ID returns a clear error. Workspace IDs
-  are read from the response, never reconstructed by splitting pane IDs.
-
-`horch worker start --worktree DIR` finds or opens the checkout's workspace without
-changing focus, reuses an available shell in that checkout, or creates a tab there.
-Clean paths and symlink aliases compare as the same directory. Multiple matching
-workspaces require an explicit `--pane`. `--worktree` cannot be combined with
-`--pane` or `--cwd`; legacy `--cwd DIR` keeps creating a tab in the caller's workspace.
 
 ## Plugin questions answered
 

@@ -2,18 +2,9 @@ package store
 
 import (
 	"database/sql"
-	"time"
 )
 
 type Dispatch struct {
-	UsageCapUntil       int64  `json:"usage_cap_until,omitempty"`
-	UsageCapUnknown     bool   `json:"usage_cap_unknown,omitempty"`
-	HoldUntil           int64  `json:"hold_until,omitempty"`
-	HoldEvent           string `json:"hold_event,omitempty"`
-	HoldReason          string `json:"hold_reason,omitempty"`
-	HeldBy              string `json:"held_by,omitempty"`
-	MonitorAfter        int64  `json:"monitor_after,omitempty"`
-	UsageCapNotice      string `json:"usage_cap_notice,omitempty"`
 	ID                  string `json:"id"`
 	TaskID              string `json:"task_id"`
 	RunID               string `json:"run_id"`
@@ -41,11 +32,11 @@ func (d Dispatch) Active() bool {
 	return d.Status == DispatchPending || d.Status == DispatchDispatched
 }
 
-const dispCols = `id,task_id,run_id,pane_id,COALESCE(agent,''),COALESCE(prompt_hash,''),status,saw_working,COALESCE(done_message_id,''),COALESCE(done_outcome,''),COALESCE(idle_since,0),unobserved_escalated,idle_escalated,nudges,started_at,COALESCE(settled_at,0),COALESCE(outcome,''),hold_until,hold_event,hold_reason,held_by,monitor_after,usage_cap_notice,usage_cap_until,usage_cap_unknown,COALESCE(account,''),COALESCE(profile,''),COALESCE(model,'')`
+const dispCols = `id,task_id,run_id,pane_id,COALESCE(agent,''),COALESCE(prompt_hash,''),status,saw_working,COALESCE(done_message_id,''),COALESCE(done_outcome,''),COALESCE(idle_since,0),unobserved_escalated,idle_escalated,nudges,started_at,COALESCE(settled_at,0),COALESCE(outcome,''),COALESCE(account,''),COALESCE(profile,''),COALESCE(model,'')`
 
 func scanDisp(r interface{ Scan(...any) error }) (Dispatch, error) {
 	var d Dispatch
-	err := r.Scan(&d.ID, &d.TaskID, &d.RunID, &d.PaneID, &d.Agent, &d.PromptHash, &d.Status, &d.SawWorking, &d.DoneMessageID, &d.DoneOutcome, &d.IdleSince, &d.UnobservedEscalated, &d.IdleEscalated, &d.Nudges, &d.StartedAt, &d.SettledAt, &d.Outcome, &d.HoldUntil, &d.HoldEvent, &d.HoldReason, &d.HeldBy, &d.MonitorAfter, &d.UsageCapNotice, &d.UsageCapUntil, &d.UsageCapUnknown, &d.Account, &d.Profile, &d.Model)
+	err := r.Scan(&d.ID, &d.TaskID, &d.RunID, &d.PaneID, &d.Agent, &d.PromptHash, &d.Status, &d.SawWorking, &d.DoneMessageID, &d.DoneOutcome, &d.IdleSince, &d.UnobservedEscalated, &d.IdleEscalated, &d.Nudges, &d.StartedAt, &d.SettledAt, &d.Outcome, &d.Account, &d.Profile, &d.Model)
 	return d, err
 }
 
@@ -97,41 +88,8 @@ func (s *Store) ActiveDispatchForPane(pane string) (Dispatch, error) {
 // `pending`. Refuses when the task is not ready, already has an active dispatch, the pane
 // is busy with another dispatch, or the circuit breaker is open.
 func (s *Store) BeginDispatch(taskID, pane, agent, promptHash string) (Dispatch, error) {
-	return s.BeginDispatchWithLeases(taskID, pane, agent, promptHash, nil, DefaultLeaseTTL)
-}
-
-func (s *Store) BeginDispatchWithLeases(taskID, pane, agent, promptHash string, resources []string, ttl time.Duration) (Dispatch, error) {
-	normalized := []string{}
-	for _, resource := range resources {
-		r, err := NormalizeResource(resource)
-		if err != nil {
-			return Dispatch{}, err
-		}
-		normalized = append(normalized, r)
-	}
-	now := s.now()
-	expires, err := leaseExpiry(now, ttl)
-	if err != nil {
-		return Dispatch{}, err
-	}
 	var id string
-	err = s.tx(func(tx *sql.Tx) error {
-		if len(normalized) > 0 {
-			if err := expireLeases(tx, now); err != nil {
-				return err
-			}
-			if err := leaseWorker(tx, pane); err != nil {
-				return err
-			}
-		}
-		var phase string
-		err := tx.QueryRow(`SELECT lifecycle FROM workers WHERE pane_id=?`, pane).Scan(&phase)
-		if err != nil && err != sql.ErrNoRows {
-			return err
-		}
-		if phase != "" {
-			return refuse("worker_lifecycle_busy", "worker %s is held for a lifecycle operation", pane)
-		}
+	err := s.tx(func(tx *sql.Tx) error {
 		t, err := getTask(tx, taskID)
 		if err != nil {
 			return err
@@ -162,11 +120,6 @@ func (s *Store) BeginDispatchWithLeases(taskID, pane, agent, promptHash string, 
 			VALUES(?,?,?,?,?,?,?,?,(SELECT account FROM workers WHERE pane_id=?),(SELECT profile FROM workers WHERE pane_id=?),(SELECT model FROM workers WHERE pane_id=?))`,
 			id, taskID, t.RunID, pane, nullStr(agent), nullStr(promptHash), DispatchPending, now, pane, pane, pane); err != nil {
 			return err
-		}
-		for _, resource := range normalized {
-			if err := acquireLease(tx, resource, pane, s.leaseScope, id, now, expires, false); err != nil {
-				return err
-			}
 		}
 		_, err = tx.Exec(`UPDATE tasks SET status=?, assignee_pane_id=?, attempts=attempts+1, updated_at=? WHERE id=?`, TaskDispatched, pane, now, taskID)
 		if err != nil {
@@ -344,7 +297,7 @@ func (s *Store) Settle(id string, success bool, outcome, result string) (Settlem
 			return err
 		}
 		if tstatus == TaskReady {
-			// Back to ready only if deps/gates still allow it.
+			// Back to ready only if deps still allow it.
 			if _, err := tx.Exec(`UPDATE tasks SET status=? WHERE id=?`, TaskPending, d.TaskID); err != nil {
 				return err
 			}
@@ -363,18 +316,12 @@ func (s *Store) Settle(id string, success bool, outcome, result string) (Settlem
 	return st, err
 }
 
-// Fence settles an active dispatch as failed without counting the attempt (the worker was
-// stopped or abandoned, not at fault). The task returns to ready.
+// Fence refunds an infrastructure failure without counting the attempt.
 func (s *Store) Fence(id, reason string) (Settlement, error) {
-	return s.fence(id, reason, false)
+	return s.fence(id, reason)
 }
 
-// FenceUnsent rolls back only resources first claimed by a prompt that was not delivered.
-// Worker stop/release fences must retain resources until process cleanup is verified.
-func (s *Store) FenceUnsent(id, reason string) (Settlement, error) {
-	return s.fence(id, reason, true)
-}
-func (s *Store) fence(id, reason string, releaseUnsent bool) (Settlement, error) {
+func (s *Store) fence(id, reason string) (Settlement, error) {
 	var st Settlement
 	err := s.tx(func(tx *sql.Tx) error {
 		d, err := scanDisp(tx.QueryRow(`SELECT `+dispCols+` FROM dispatches WHERE id=?`, id))
@@ -395,14 +342,6 @@ func (s *Store) fence(id, reason string, releaseUnsent bool) (Settlement, error)
 		if err != nil {
 			return err
 		}
-		if releaseUnsent {
-			if d.Status != DispatchPending {
-				return refuse("dispatch_sent", "dispatch %s was already submitted; leases must be retained", id)
-			}
-			if _, err := tx.Exec(`DELETE FROM lease_registry.leases WHERE dispatch_id=? AND scope=?`, id, s.leaseScope); err != nil {
-				return err
-			}
-		}
 		st.NowReady, err = refreshReadiness(tx, t.RunID, now)
 		return err
 	})
@@ -419,77 +358,4 @@ func (s *Store) LastSettledForPane(pane string) (int64, error) {
 	var t int64
 	err := s.db.QueryRow(`SELECT COALESCE(MAX(settled_at),0) FROM dispatches WHERE pane_id=?`, pane).Scan(&t)
 	return t, err
-}
-
-// Held reports an unexpired timed hold or an explicitly resumed event hold.
-func (d Dispatch) Held(now int64) bool {
-	return d.HoldEvent != "" || d.HoldUntil > now
-}
-
-// HoldDispatch preserves the active claim while suppressing supervision reminders.
-func (s *Store) HoldDispatch(id string, until int64, event, reason, actor string) (Dispatch, error) {
-	if (until <= s.now() && event == "") || (until != 0 && event != "") || reason == "" {
-		return Dispatch{}, refuse("bad_args", "hold requires a future deadline or event, and a reason")
-	}
-	res, err := s.db.Exec(`UPDATE dispatches SET hold_until=?,hold_event=?,hold_reason=?,held_by=? WHERE id=? AND status IN (?,?)`, until, event, reason, actor, id, DispatchPending, DispatchDispatched)
-	if err != nil {
-		return Dispatch{}, err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return Dispatch{}, refuse("no_active_dispatch", "dispatch %s is not active", id)
-	}
-	return s.GetDispatch(id)
-}
-
-// ResumeDispatch starts a fresh supervision grace period, without changing attempt history.
-func (s *Store) ResumeDispatch(id string) (Dispatch, error) {
-	now := s.now()
-	res, err := s.db.Exec(`UPDATE dispatches SET hold_until=0,hold_event='',hold_reason='',held_by='',usage_cap_until=0,usage_cap_unknown=0,idle_since=?,idle_escalated=0,unobserved_escalated=0,monitor_after=? WHERE id=? AND status IN (?,?)`, now, now, id, DispatchPending, DispatchDispatched)
-	if err != nil {
-		return Dispatch{}, err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return Dispatch{}, refuse("no_active_dispatch", "dispatch %s is not active", id)
-	}
-	return s.GetDispatch(id)
-}
-
-func (s *Store) SetUsageCapNotice(id, notice string) error {
-	_, err := s.db.Exec(`UPDATE dispatches SET usage_cap_notice=? WHERE id=?`, notice, id)
-	return err
-}
-
-// RecordUsageCap commits the cap, automatic hold and its single escalation together.
-// An existing coordinator hold is retained; cap metadata survives its earlier expiry.
-func (s *Store) RecordUsageCap(id, notice string, until int64, unknown bool, m Message) (Dispatch, error) {
-	err := s.tx(func(tx *sql.Tx) error {
-		d, err := scanDisp(tx.QueryRow(`SELECT `+dispCols+` FROM dispatches WHERE id=?`, id))
-		if err != nil {
-			return err
-		}
-		if !d.Active() {
-			return refuse("no_active_dispatch", "dispatch is not active")
-		}
-		if d.UsageCapNotice == notice {
-			return nil
-		}
-		if _, err := tx.Exec(`UPDATE dispatches SET usage_cap_notice=?,usage_cap_until=?,usage_cap_unknown=? WHERE id=?`, notice, until, unknown, id); err != nil {
-			return err
-		}
-		if !d.Held(s.now()) {
-			event := ""
-			if unknown {
-				event = "usage-reset"
-			}
-			if _, err := tx.Exec(`UPDATE dispatches SET hold_until=?,hold_event=?,hold_reason='agent usage cap',held_by=? WHERE id=?`, until, event, Daemon, id); err != nil {
-				return err
-			}
-		}
-		_, err = insertMessage(tx, m, s.now())
-		return err
-	})
-	if err != nil {
-		return Dispatch{}, err
-	}
-	return s.GetDispatch(id)
 }

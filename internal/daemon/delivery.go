@@ -117,9 +117,6 @@ func (e *Engine) waitPickup(ctx context.Context, messages []store.Message, timeo
 }
 
 func (e *Engine) readyPane(ctx context.Context, pane string) (bool, error) {
-	if e.st.WorkerLifecycleHeld(pane) {
-		return false, nil
-	}
 	p, err := e.h.PaneGet(ctx, pane)
 	if err != nil {
 		return false, err
@@ -207,7 +204,7 @@ func (e *Engine) awaitPickup(ctx context.Context, m store.Message, seq pickupGen
 			return false
 		}
 		e.mu.Lock()
-		if e.paneEpoch[m.To] != seq.epoch || e.st.WorkerLifecycleHeld(m.To) || ctx.Err() != nil {
+		if e.paneEpoch[m.To] != seq.epoch || ctx.Err() != nil {
 			e.mu.Unlock()
 			return false
 		}

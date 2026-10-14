@@ -22,66 +22,42 @@ import (
 	"github.com/ellingtonsp/herdr-orch/skills"
 )
 
-const usage = `horch — herdr orchestration (mailbox, tasks, dispatch, gates, workers, schedules)
+const usage = `horch — persistent pane orchestration (mailbox, tasks, dispatch, workers)
 
-  horch run create --title T [--auto-dispatch] [--max-attempts N]
+  horch run create --title T [--max-attempts N]
   horch run use <run> | current | list | show [--run R]
-  horch run update [--run R] [--status S] [--coordinator me|PANE] [--auto on|off] [--max-attempts N]
-                   [--idle-report 10m] [--flag-idle 30m|0] [--max-load N] [--min-free-mem PCT]
+  horch run update [--run R] [--status S] [--coordinator me|PANE]
+                   [--max-attempts N] [--idle-report 10m]
 
-  horch send --to coordinator|run|human|PANE|NAME [--subject S] --body B [--kind note|question|escalation] [--wait-pickup] [--timeout 5m]
-  horch done [--task T] --body B [--failed]          (report a dispatched task finished)
-  horch check [--wait] [--timeout 10m] [--peek]      horch inbox [--all] [--limit N]
-  horch ask [--to coordinator] --question Q [--timeout 30m]   (blocks until replied)
-  horch reply --id MSG --body B                   horch ack --id MSG
+  horch send --to coordinator|run|human|PANE|NAME [--subject S] --body B
+             [--kind note|question|escalation] [--wait-pickup] [--timeout 5m]
+  horch done [--task T] --body B [--failed]
+  horch check [--wait] [--timeout 10m] [--peek]
+  horch inbox [--all] [--limit N]
+  horch ask [--to coordinator] --question Q [--timeout 30m]
+  horch reply --id MSG --body B
+  horch ack --id MSG
 
   horch task create --title T [--spec S | --spec-file F] [--deps a,b]
   horch task list | show --id T | update --id T [--status S] [--deps a,b] [--reset-attempts] ...
-  horch dispatch --task T --to PANE|NAME|new:<agent> [--cwd DIR] [--lease RESOURCE]     horch dispatch --spec S --to ...
-  horch dispatch show --task T | --id D              horch dispatch next [--run R]
-  horch dispatch nudge --task T [--text S] [--force]  (remind an idle worker to report)
-  horch dispatch fail --task T --reason R [--infra]  (infra refunds the attempt)
-  horch dispatch hold --task T --until RFC3339|duration|event:NAME --reason R
-  horch dispatch resume --task T
+  horch dispatch --task T --to PANE|NAME
+  horch dispatch --spec S --to PANE|NAME
+  horch dispatch show --task T | --id D
+  horch dispatch next [--run R]
+  horch dispatch nudge --task T [--text S] [--force]
+  horch dispatch fail --task T --reason R [--infra]
 
-  horch pr watch <n> [--until green|merged] [--repo owner/name] [--interval 15s] [--race-window 5s] [--run R]
-
-  horch worker start --agent claude|pi|codex [--worktree DIR | --pane PANE] [--name N] [--account LABEL] [--profile LABEL] [--model ID] [-- agent args]
-  horch worker register [--pane PANE] [--name N]
-  horch worker show|read|stop|release|retain|abandon --worker PANE|NAME [--force] [--lines N] [--off]
-  horch worker restart --worker W [--env KEY=VAL] [--unset KEY]
-  horch worker release --worker W [--hand-off-to W]
+  horch worker register [--pane PANE] [--name N] [--run R] [--worktree DIR]
+  horch worker show|read --worker PANE|NAME [--lines N]
   horch worker list [--all]
 
-  horch lease acquire --resource sim:<udid>|port:<n>|db:<name> --worker PANE|NAME [--ttl 1h]
-  horch lease release --resource RESOURCE --worker PANE|NAME   horch lease list
-  horch sweep [--dry-run]
-
-  horch gate create [--task T] --question Q [--options a,b] [--timeout 1h]
-  horch gate resolve --id G --decision D             horch gate list [--all]
-
-  horch schedule add --cron "*/30 * * * *" (--horch "dispatch next" | --prompt-to NAME --prompt TEXT)
-  horch schedule list | rm --id S | run --id S | enable --id S [--off]
-
-  horch plan import --day D --file PLAN.md [--ref COMMIT] [--status draft|live] [--replace]
-  horch plan show [--day D]                          (default: the project's latest plan)
-  horch plan item add --item ID [--position N] [--issues a,b] [--kind K] [--lane L] [--model M]
-                      [--state S] [--pr P] [--dispatch-ref R] [--title T] [--where W] [--output O] [--why Y]
-  horch plan item update --item ID [field flags as for add] [--if-version N]
-  horch plan item move --item ID --to N | hold --item ID --reason R | release --item ID | remove --item ID
-  horch plan transition --item ID --state S [--note N] [--pr P] [--dispatch-ref R]   (orchestrator path)
-  horch plan events [--since SEQ] [--follow] [--all]   horch plan status --set draft|live|final
-  horch plan export [--day D] [--format md|json] [--out FILE] [--finalize]
-    plan flags: --project P (default: config default_project), --principal NAME ($HORCH_PRINCIPAL),
-    --if-version N (item) / --if-plan-version N (plan): refused if stale.
-  horch web [--listen 127.0.0.1:7171]              (embedded fleet UI; Ctrl-C stops HTTP only)
-  horch config          show ~/.config/horch/config.toml ($HORCH_CONFIG) and what is missing
-
-  horch status          daemon health          horch daemon stop
-  horch guide           print the agent guide (SKILL.md)
+  horch status
+  horch daemon stop
+  horch config
+  horch guide
   horch version
 
-Global: --json (machine output), --as PANE (act as another identity; default $HERDR_PANE_ID).
+Global: --json (machine output), --as PANE (default $HERDR_PANE_ID).
 `
 
 var (
@@ -194,10 +170,6 @@ func dispatch(ctx context.Context, args []string) error {
 		sub = rest[0]
 	}
 	switch cmd {
-	case "lease":
-		return cmdLease(ctx, sub, tail(rest))
-	case "sweep":
-		return cmdSweep(ctx, rest)
 	case "run":
 		return cmdRun(ctx, sub, tail(rest))
 	case "send":
@@ -217,22 +189,15 @@ func dispatch(ctx context.Context, args []string) error {
 	case "task":
 		return cmdTask(ctx, sub, tail(rest))
 	case "dispatch":
-		if sub == "show" || sub == "next" || sub == "nudge" || sub == "fail" || sub == "hold" || sub == "resume" {
+		if sub == "show" || sub == "next" || sub == "nudge" || sub == "fail" {
 			return cmdDispatchSub(ctx, sub, tail(rest))
 		}
+		if sub != "" {
+			return usageErr("unknown dispatch subcommand %q", sub)
+		}
 		return cmdDispatch(ctx, rest)
-	case "pr":
-		return cmdPR(ctx, sub, tail(rest))
 	case "worker":
 		return cmdWorker(ctx, sub, tail(rest))
-	case "gate":
-		return cmdGate(ctx, sub, tail(rest))
-	case "schedule":
-		return cmdSchedule(ctx, sub, tail(rest))
-	case "plan":
-		return cmdPlan(ctx, sub, tail(rest))
-	case "web":
-		return cmdWeb(ctx, rest)
 	case "config":
 		return cmdConfig(rest)
 	case "status":
@@ -293,20 +258,6 @@ func durMS(s string) (int64, error) {
 	return d.Milliseconds(), nil
 }
 
-func onOff(s string) (*bool, error) {
-	switch s {
-	case "":
-		return nil, nil
-	case "on", "true", "yes":
-		v := true
-		return &v, nil
-	case "off", "false", "no":
-		v := false
-		return &v, nil
-	}
-	return nil, usageErr("expected on|off, got %q", s)
-}
-
 func strPtr(f *flag.FlagSet, name string, v string) *string {
 	set := false
 	f.Visit(func(fl *flag.Flag) {
@@ -326,15 +277,10 @@ func cmdRun(ctx context.Context, sub string, args []string) error {
 	f := fs("run " + sub)
 	runID := f.String("run", "", "")
 	title := f.String("title", "", "")
-	auto := f.Bool("auto-dispatch", false, "")
 	maxA := f.Int("max-attempts", 0, "")
 	status := f.String("status", "", "")
 	coord := f.String("coordinator", "", "")
-	autoS := f.String("auto", "", "")
 	idleReport := f.String("idle-report", "", "")
-	flagIdle := f.String("flag-idle", "", "")
-	maxLoad := f.Float64("max-load", 0, "")
-	minFreeMem := f.Float64("min-free-mem", 0, "")
 	pos, err := parse(f, args)
 	if err != nil {
 		return err
@@ -347,7 +293,7 @@ func cmdRun(ctx context.Context, sub string, args []string) error {
 		if *title == "" {
 			*title = pos
 		}
-		return run(ctx, "run.create", daemon.RunCreateArgs{Title: *title, AutoDispatch: *auto, MaxAttempts: *maxA, Coordinator: *coord}, printRun)
+		return run(ctx, "run.create", daemon.RunCreateArgs{Title: *title, MaxAttempts: *maxA, Coordinator: *coord}, printRun)
 	case "use":
 		return run(ctx, "run.use", daemon.RunRef{Run: *runID}, printRun)
 	case "current":
@@ -358,36 +304,15 @@ func cmdRun(ctx context.Context, sub string, args []string) error {
 		return run(ctx, "run.show", daemon.RunRef{Run: *runID}, printRunShow)
 	case "update":
 		a := daemon.RunUpdateArgs{Run: *runID, Status: strPtr(f, "status", *status), Coordinator: strPtr(f, "coordinator", *coord), Title: strPtr(f, "title", *title)}
-		if a.AutoDispatch, err = onOff(*autoS); err != nil {
-			return err
-		}
-		if a.AutoDispatch == nil && *auto {
-			a.AutoDispatch = auto
-		}
 		if *maxA > 0 {
 			a.MaxAttempts = maxA
 		}
-		f.Visit(func(fl *flag.Flag) {
-			if fl.Name == "max-load" {
-				a.MaxLoad = maxLoad
-			}
-			if fl.Name == "min-free-mem" {
-				a.MinFreeMem = minFreeMem
-			}
-		})
 		if *idleReport != "" {
 			ms, err := durMS(*idleReport)
 			if err != nil {
 				return err
 			}
 			a.IdleReportMS = &ms
-		}
-		if *flagIdle != "" {
-			ms, err := durMS(*flagIdle)
-			if err != nil {
-				return err
-			}
-			a.IdleFlagMS = &ms
 		}
 		return run(ctx, "run.update", a, printRun)
 	}
@@ -608,19 +533,6 @@ func cmdDispatch(ctx context.Context, args []string) error {
 	f.StringVar(&a.To, "to", "", "")
 	f.StringVar(&a.Title, "title", "", "")
 	f.StringVar(&a.Spec, "spec", "", "")
-	f.StringVar(&a.Cwd, "cwd", "", "")
-	f.StringVar(&a.Cwd, "worktree", "", "")
-	f.StringVar(&a.Name, "name", "", "")
-	f.Func("lease", "", func(value string) error {
-		for _, r := range strings.Split(value, ",") {
-			r = strings.TrimSpace(r)
-			if _, err := store.NormalizeResource(r); err != nil {
-				return err
-			}
-			a.Leases = append(a.Leases, r)
-		}
-		return nil
-	})
 	if _, err := parse(f, args); err != nil {
 		return err
 	}
@@ -629,7 +541,6 @@ func cmdDispatch(ctx context.Context, args []string) error {
 
 func cmdDispatchSub(ctx context.Context, sub string, args []string) error {
 	f := fs("dispatch " + sub)
-	until := f.String("until", "", "")
 	infra := f.Bool("infra", false, "")
 	task := f.String("task", "", "")
 	id := f.String("id", "", "")
@@ -656,20 +567,6 @@ func cmdDispatchSub(ctx context.Context, sub string, args []string) error {
 			_ = json.Unmarshal(raw, &r)
 			fmt.Printf("nudged %s on task %s (nudge %d)\n", r.Dispatch.PaneID, r.Dispatch.TaskID, r.Nudges)
 		})
-	case "hold", "resume":
-		return run(ctx, "dispatch."+sub, daemon.DispatchHoldArgs{Task: *task, Until: *until, Reason: *reason}, func(raw json.RawMessage) {
-			var d store.Dispatch
-			_ = json.Unmarshal(raw, &d)
-			if sub == "resume" {
-				fmt.Printf("resumed task %s (dispatch %s)\n", d.TaskID, d.ID)
-				return
-			}
-			until := "event:" + d.HoldEvent
-			if d.HoldUntil > 0 {
-				until = time.UnixMilli(d.HoldUntil).Format(time.RFC3339)
-			}
-			fmt.Printf("held task %s until %s: %s\n", d.TaskID, until, d.HoldReason)
-		})
 	case "fail":
 		return run(ctx, "dispatch.fail", daemon.DispatchActArgs{Task: *task, Reason: *reason, Infra: *infra}, func(raw json.RawMessage) {
 			var st store.Settlement
@@ -683,31 +580,14 @@ func cmdDispatchSub(ctx context.Context, sub string, args []string) error {
 // ---------- workers ----------
 
 func cmdWorker(ctx context.Context, sub string, args []string) error {
-	var extra []string
-	for i, a := range args {
-		if a == "--" {
-			extra, args = args[i+1:], args[:i]
-			break
-		}
-	}
 	f := fs("worker " + sub)
-	var env, unset []string
-	f.Func("env", "environment assignment (repeatable)", func(v string) error { env = append(env, v); return nil })
-	f.Func("unset", "environment key (repeatable)", func(v string) error { unset = append(unset, v); return nil })
-	handOff := f.String("hand-off-to", "", "")
 	runID := f.String("run", "", "")
 	worker := f.String("worker", "", "")
-	agent := f.String("agent", "", "")
-	account := f.String("account", "", "")
-	profile := f.String("profile", "", "")
-	model := f.String("model", "", "")
 	name := f.String("name", "", "")
 	worktree := f.String("worktree", "", "")
 	cwd := f.String("cwd", "", "")
 	pane := f.String("pane", "", "")
-	force := f.Bool("force", false, "")
 	lines := f.Int("lines", 0, "")
-	off := f.Bool("off", false, "")
 	all := f.Bool("all", false, "")
 	pos, err := parse(f, args)
 	if err != nil {
@@ -716,17 +596,13 @@ func cmdWorker(ctx context.Context, sub string, args []string) error {
 	if *worker == "" {
 		*worker = pos
 	}
-	ref := daemon.WorkerRef{Worker: *worker, Force: *force, Lines: *lines, Off: *off, HandOffTo: *handOff}
+	ref := daemon.WorkerRef{Worker: *worker, Lines: *lines}
 	switch sub {
-	case "restart":
-		return run(ctx, "worker.restart", daemon.WorkerRestartArgs{Worker: *worker, Env: env, Unset: unset}, nil)
-	case "start":
-		return run(ctx, "worker.start", daemon.WorkerStartArgs{Run: *runID, Agent: *agent, Name: *name, Cwd: *cwd, Worktree: *worktree, Args: extra, Pane: *pane, Account: *account, Profile: *profile, Model: *model}, printWorker)
 	case "register":
 		if *pane == "" {
 			*pane = pos
 		}
-		return run(ctx, "worker.register", daemon.WorkerRegisterArgs{Run: *runID, Pane: *pane, Name: *name, Worktree: firstNonempty(*worktree, *cwd)}, printWorker)
+		return run(ctx, "worker.register", daemon.WorkerRegisterArgs{Run: *runID, Pane: *pane, Name: *name, Worktree: or(*worktree, *cwd)}, printWorker)
 	case "list", "":
 		return run(ctx, "worker.list", daemon.WorkerListArgs{Run: *runID, All: *all}, printWorkers)
 	case "read":
@@ -737,122 +613,8 @@ func cmdWorker(ctx context.Context, sub string, args []string) error {
 			_ = json.Unmarshal(raw, &r)
 			fmt.Println(r.Text)
 		})
-	case "show", "retain", "abandon":
+	case "show":
 		return run(ctx, "worker."+sub, ref, nil)
-	case "stop", "release":
-		return run(ctx, "worker."+sub, ref, printCloseResult)
 	}
 	return usageErr("unknown worker subcommand %q", sub)
-}
-
-// ---------- gates ----------
-
-func cmdGate(ctx context.Context, sub string, args []string) error {
-	f := fs("gate " + sub)
-	runID := f.String("run", "", "")
-	task := f.String("task", "", "")
-	question := f.String("question", "", "")
-	options := f.String("options", "", "")
-	timeout := f.String("timeout", "", "")
-	id := f.String("id", "", "")
-	decision := f.String("decision", "", "")
-	all := f.Bool("all", false, "")
-	pos, err := parse(f, args)
-	if err != nil {
-		return err
-	}
-	if *id == "" {
-		*id = pos
-	}
-	switch sub {
-	case "create":
-		ms, err := durMS(*timeout)
-		if err != nil {
-			return err
-		}
-		return run(ctx, "gate.create", daemon.GateCreateArgs{Run: *runID, Task: *task, Question: *question, Options: splitList(*options), TimeoutMS: ms}, printGate)
-	case "resolve":
-		return run(ctx, "gate.resolve", daemon.GateResolveArgs{ID: *id, Decision: *decision}, printGate)
-	case "list", "":
-		return run(ctx, "gate.list", daemon.GateListArgs{Run: *runID, All: *all}, printGates)
-	}
-	return usageErr("unknown gate subcommand %q", sub)
-}
-
-// ---------- schedules ----------
-
-func cmdSchedule(ctx context.Context, sub string, args []string) error {
-	f := fs("schedule " + sub)
-	cron := f.String("cron", "", "")
-	horchArgs := f.String("horch", "", "")
-	promptTo := f.String("prompt-to", "", "")
-	prompt := f.String("prompt", "", "")
-	id := f.String("id", "", "")
-	off := f.Bool("off", false, "")
-	pos, err := parse(f, args)
-	if err != nil {
-		return err
-	}
-	if *id == "" {
-		*id = pos
-	}
-	switch sub {
-	case "add":
-		a := daemon.ScheduleAddArgs{Cron: *cron}
-		if *horchArgs != "" {
-			words, err := shellSplit(*horchArgs)
-			if err != nil {
-				return err
-			}
-			a.Action = daemon.Action{Type: "horch", Args: words}
-		} else {
-			a.Action = daemon.Action{Type: "prompt", To: *promptTo, Text: *prompt}
-		}
-		return run(ctx, "schedule.add", a, nil)
-	case "list", "":
-		return run(ctx, "schedule.list", nil, nil)
-	case "rm":
-		return run(ctx, "schedule.rm", daemon.ScheduleRef{ID: *id}, nil)
-	case "run":
-		return run(ctx, "schedule.run", daemon.ScheduleRef{ID: *id}, nil)
-	case "enable":
-		return run(ctx, "schedule.enable", daemon.ScheduleRef{ID: *id, Off: *off}, nil)
-	}
-	return usageErr("unknown schedule subcommand %q", sub)
-}
-
-// shellSplit splits a command line on whitespace, honouring single and double quotes.
-func shellSplit(s string) ([]string, error) {
-	var out []string
-	var cur strings.Builder
-	var quote rune
-	inWord := false
-	for _, r := range s {
-		switch {
-		case quote != 0:
-			if r == quote {
-				quote = 0
-			} else {
-				cur.WriteRune(r)
-			}
-		case r == '\'' || r == '"':
-			quote, inWord = r, true
-		case r == ' ' || r == '\t' || r == '\n':
-			if inWord {
-				out = append(out, cur.String())
-				cur.Reset()
-				inWord = false
-			}
-		default:
-			cur.WriteRune(r)
-			inWord = true
-		}
-	}
-	if quote != 0 {
-		return nil, usageErr("unbalanced quote in %q", s)
-	}
-	if inWord {
-		out = append(out, cur.String())
-	}
-	return out, nil
 }

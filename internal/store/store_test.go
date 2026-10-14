@@ -4,7 +4,6 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func open(t *testing.T) *Store {
@@ -141,58 +140,6 @@ func TestDepCycleRefused(t *testing.T) {
 	refusal(t, err, "dep_cycle")
 	_, _, err = s.UpdateTask(a.ID, TaskUpdate{Deps: &[]string{a.ID}})
 	refusal(t, err, "dep_cycle")
-}
-
-func TestGateBlocksTask(t *testing.T) {
-	s := open(t)
-	r := must[Run](t)(s.CreateRun("gate", ""))
-	a := must[Task](t)(s.CreateTask(r.ID, "A", "", nil))
-	g := must[Gate](t)(s.CreateGate("", a.ID, "ship it?", []string{"yes", "no"}, 0))
-	if g.RunID != r.ID || status(t, s, a.ID) != TaskBlocked {
-		t.Fatalf("gate should block A: %s", status(t, s, a.ID))
-	}
-	_, err := s.BeginDispatch(a.ID, "w", "", "")
-	refusal(t, err, "task_not_ready")
-	_, _, err = s.ResolveGate(g.ID, "maybe", "human")
-	refusal(t, err, "bad_decision")
-	g2, ready, err := s.ResolveGate(g.ID, "yes", "human")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if g2.Status != GateResolved || g2.Decision != "yes" || len(ready) != 1 {
-		t.Fatalf("resolve: %+v ready=%v", g2, ready)
-	}
-	_, _, err = s.ResolveGate(g.ID, "no", "human")
-	refusal(t, err, "gate_resolved")
-
-	// A gate cannot be put in front of a dispatched task.
-	must[Dispatch](t)(s.BeginDispatch(a.ID, "w", "", ""))
-	_, err = s.CreateGate("", a.ID, "late?", nil, 0)
-	refusal(t, err, "task_not_gateable")
-}
-
-func TestGateTimeoutKeepsTaskBlocked(t *testing.T) {
-	s := open(t)
-	now := time.Unix(1000, 0)
-	s.Now = func() time.Time { return now }
-	r := must[Run](t)(s.CreateRun("gate", ""))
-	a := must[Task](t)(s.CreateTask(r.ID, "A", "", nil))
-	g := must[Gate](t)(s.CreateGate("", a.ID, "?", nil, now.Add(time.Minute).UnixMilli()))
-	if exp := must[[]Gate](t)(s.ExpireGates()); len(exp) != 0 {
-		t.Fatal("expired early")
-	}
-	now = now.Add(2 * time.Minute)
-	exp := must[[]Gate](t)(s.ExpireGates())
-	if len(exp) != 1 || exp[0].ID != g.ID || exp[0].Status != GateTimeout {
-		t.Fatalf("expire: %+v", exp)
-	}
-	if status(t, s, a.ID) != TaskBlocked {
-		t.Fatal("timed-out gate must keep its task blocked")
-	}
-	_, ready, err := s.ResolveGate(g.ID, "go", "human")
-	if err != nil || len(ready) != 1 {
-		t.Fatalf("resolve after timeout: %v %v", ready, err)
-	}
 }
 
 func TestCircuitBreaker(t *testing.T) {

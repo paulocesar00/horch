@@ -4,8 +4,7 @@
 background delivery job, serialized per pane. A busy worker can finish its current turn;
 startup hooks, unknown status and blocked dialogs are not input-ready states. The job waits
 up to two minutes per attempt for two consecutive idle/done readiness observations, 500 ms
-apart. Worker restart/release reservations also block terminal delivery; lifecycle activity
-is not pickup evidence. Where herdr exposes `interactive_ready`, it must not be false.
+apart. Where herdr exposes `interactive_ready`, it must not be false.
 
 ```sh
 horch send --to worker-a --body "Please inspect the new test failure." --wait-pickup
@@ -69,7 +68,7 @@ waiter holds the lease. This lease prevents concurrent consumers; it does not pr
 exactly-once delivery if a client disconnects after the database read but before receiving
 its response. For explicit processing acknowledgement, use peek followed by ack.
 
-## Late completion reports and launch metadata
+## Late completion reports
 
 `horch done --task t12 --body -` accepts a report after that task's latest dispatch has
 closed. It appends a late note associated with that dispatch and notifies the coordinator.
@@ -77,22 +76,3 @@ The existing task result, attempt count and dispatch settlement do not change, i
 when the late report uses `--failed`. Only that dispatch's assignee can report. Without
 `--task`, done still resolves the caller's active dispatch; specify the task for a late note.
 `horch dispatch show --task t12 --json` includes the complete associated `reports` history.
-
-```sh
-horch worker start --agent codex --name worker-a --worktree ../myapp-a \
-  --account account-a --profile profile-a --model model-id
-```
-
-`--account` and `--profile` are recorded labels, not authentication or account-switching
-commands. Put agent-specific selection flags after `--`. Account, profile and model values
-are also captured from `--account`, `--profile`, and `--model`/`-m` launch arguments.
-`--model` before the separator adds the agent's `--model` option unless one is already
-present; a model supplied in the agent arguments takes precedence. Values are supplied
-launch metadata, not verified account identity or proof of the effective runtime model.
-They are saved alongside restart launch arguments on the worker and snapshotted on each
-dispatch. Restart replacements retain the snapshot; release hand-offs preserve each
-worker's identity. Metadata is included in completion
-and late-report notifications. Do not put credentials in these labels.
-
-The messaging migrations follow the released dispatch-hold and worker-lifecycle migrations;
-existing holds, usage-cap notices, restart reservations and hand-off receipts are preserved.
