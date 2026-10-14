@@ -9,6 +9,7 @@ import (
 func TestDispatchMetadataSurvivesWorkerReregistration(t *testing.T) {
 	x := newHarness(t)
 	r := setupRun(x, "w1:p2")
+	x.h.addPane("w1:p2", "codex", "idle", true)
 	_, err := x.st.RegisterWorker(store.Worker{PaneID: "w1:p2", RunID: r.ID, Agent: "codex", Account: "account-a", Profile: "profile-a", Model: "model-a"})
 	if err != nil {
 		t.Fatal(err)
