@@ -266,6 +266,19 @@ func (e *Engine) deliverMessage(ctx context.Context, m store.Message) {
 			e.notify.broadcast()
 			return
 		}
+		pending := false
+		if attempt > 0 {
+			screen, err := e.h.PaneRead(ctx, m.To, 30)
+			if err != nil {
+				reason = "cannot inspect composer before retry: " + err.Error()
+				break
+			}
+			if strings.Contains(screen, "[horch message "+m.ID+"]") {
+				reason = "message marker is already visible; inspect the pane before resending"
+				break
+			}
+			pending = pendingComposer(screen)
+		}
 		seq := e.workingGeneration(m.To)
 		if seq.epoch != epoch {
 			reason = "pane exited during delivery; inspect it before resending"
@@ -280,24 +293,11 @@ func (e *Engine) deliverMessage(ctx context.Context, m store.Message) {
 			return
 		}
 		var sendErr error
-		if attempt > 0 {
-			screen, err := e.h.PaneRead(ctx, m.To, 30)
-			if err != nil {
-				reason = "cannot inspect composer before retry: " + err.Error()
-				break
-			}
-			if strings.Contains(screen, "[horch message "+m.ID+"]") {
-				reason = "message marker is already visible; inspect the pane before resending"
-				break
-			}
-			if pendingComposer(screen) {
-				if sender, ok := e.h.(pendingSubmitter); ok {
-					sendErr = sender.SubmitPending(ctx, m.To)
-				} else {
-					sendErr = fmt.Errorf("pending composer cannot be submitted by this transport")
-				}
+		if pending {
+			if sender, ok := e.h.(pendingSubmitter); ok {
+				sendErr = sender.SubmitPending(ctx, m.To)
 			} else {
-				_, sendErr = e.submitDelivery(ctx, m.To, prompt)
+				sendErr = fmt.Errorf("pending composer cannot be submitted by this transport")
 			}
 		} else {
 			_, sendErr = e.submitDelivery(ctx, m.To, prompt)

@@ -343,7 +343,7 @@ func TestDeliveryDoesNotResubmitVisibleMessageMarker(t *testing.T) {
 	h.screen = "conversation history\n[horch message " + m.ID + "] from w1:p1\n"
 	x.e.deliverMessage(context.Background(), m)
 	got, err := x.st.GetMessage(m.ID)
-	if err != nil || h.sends != 1 || h.submits != 0 || picked(got) {
-		t.Fatalf("resubmitted visible message: sends=%d submits=%d status=%s err=%v", h.sends, h.submits, got.DeliveryStatus, err)
+	if err != nil || h.sends != 1 || h.submits != 0 || got.DeliveryAttempts != 1 || picked(got) {
+		t.Fatalf("resubmitted visible message: sends=%d submits=%d attempts=%d status=%s err=%v", h.sends, h.submits, got.DeliveryAttempts, got.DeliveryStatus, err)
 	}
 }
