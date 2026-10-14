@@ -4,6 +4,7 @@ import (
 	"github.com/ellingtonsp/herdr-orch/internal/store"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDispatchMetadataSurvivesWorkerReregistration(t *testing.T) {
@@ -20,6 +21,7 @@ func TestDispatchMetadataSurvivesWorkerReregistration(t *testing.T) {
 	x.status("w1:p2", "working")
 	x.mustOp("w1:p2", "send", SendArgs{Kind: store.KindDone, Task: task.ID, Body: "summary"}, nil)
 	x.status("w1:p2", "idle")
+	x.advance(time.Second)
 	check := func(kind string) {
 		t.Helper()
 		messages := x.inbox(coord)

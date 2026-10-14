@@ -391,7 +391,33 @@ func cmdCheck(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return run(ctx, "check", daemon.CheckArgs{Wait: *wait, TimeoutMS: ms, Peek: *peek, Consumer: consumerLabel()}, printMessages)
+	raw, err := call(ctx, "check", daemon.CheckArgs{Wait: *wait, TimeoutMS: ms, Peek: *peek, Consumer: consumerLabel()})
+	if err != nil {
+		return err
+	}
+	var messages []store.Message
+	if err := json.Unmarshal(raw, &messages); err != nil {
+		return err
+	}
+	output := string(raw) + "\n"
+	if !jsonOut {
+		output = formatMessages(messages)
+	}
+	n, err := io.WriteString(os.Stdout, output)
+	if err != nil {
+		return err
+	}
+	if n != len(output) {
+		return io.ErrShortWrite
+	}
+	if !*peek {
+		for _, m := range messages {
+			if err := cli.Call(ctx, "ack", daemon.AckArgs{ID: m.ID, Consumer: consumerLabel()}, nil); err != nil {
+				return fmt.Errorf("message %s printed but not acknowledged: %w", m.ID, err)
+			}
+		}
+	}
+	return nil
 }
 
 // consumerLabel names this process in mailbox lease refusals.

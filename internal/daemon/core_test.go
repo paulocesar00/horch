@@ -3,6 +3,7 @@ package daemon
 import (
 	"github.com/ellingtonsp/herdr-orch/internal/store"
 	"testing"
+	"time"
 )
 
 func TestCoreOpsExcludeRemovedFeatures(t *testing.T) {
@@ -45,6 +46,7 @@ func TestPersistentWorkerHandlesTwoTasks(t *testing.T) {
 		x.status("w1:p2", "working")
 		x.mustOp("w1:p2", "send", SendArgs{Kind: store.KindDone, Body: title}, nil)
 		x.status("w1:p2", "idle")
+		x.advance(time.Second)
 		if x.task(task.ID).Status != store.TaskCompleted {
 			t.Fatal("task did not complete")
 		}

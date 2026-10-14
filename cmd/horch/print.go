@@ -122,9 +122,13 @@ func printDispatches(raw json.RawMessage) {
 func printMessages(raw json.RawMessage) {
 	var ms []store.Message
 	_ = json.Unmarshal(raw, &ms)
+	fmt.Print(formatMessages(ms))
+}
+
+func formatMessages(ms []store.Message) string {
+	var out strings.Builder
 	if len(ms) == 0 {
-		fmt.Println("no messages")
-		return
+		return "no messages\n"
 	}
 	for _, m := range ms {
 		head := fmt.Sprintf("── %s %s from %s to %s", m.ID, m.Kind, m.From, m.To)
@@ -141,20 +145,21 @@ func printMessages(raw json.RawMessage) {
 			}
 		}
 		head += " · " + ago(m.CreatedAt) + " ago"
-		fmt.Println(head)
+		fmt.Fprintln(&out, head)
 		if m.DeliveryError != "" {
-			fmt.Println("Delivery: " + m.DeliveryError)
+			fmt.Fprintln(&out, "Delivery: "+m.DeliveryError)
 		}
 		if m.Subject != "" {
-			fmt.Println(m.Subject)
+			fmt.Fprintln(&out, m.Subject)
 		}
 		if m.Body != "" {
-			fmt.Println(m.Body)
+			fmt.Fprintln(&out, m.Body)
 		}
 		if m.Kind == store.KindQuestion {
-			fmt.Printf("(answer with: horch reply --id %s --body \"...\")\n", m.ID)
+			fmt.Fprintf(&out, "(answer with: horch reply --id %s --body \"...\")\n", m.ID)
 		}
 	}
+	return out.String()
 }
 
 func printSent(raw json.RawMessage) {

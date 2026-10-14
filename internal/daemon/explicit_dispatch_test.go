@@ -3,6 +3,7 @@ package daemon
 import (
 	"github.com/ellingtonsp/herdr-orch/internal/store"
 	"testing"
+	"time"
 )
 
 func TestCompletionLeavesDependentReadyForExplicitDispatch(t *testing.T) {
@@ -15,7 +16,7 @@ func TestCompletionLeavesDependentReadyForExplicitDispatch(t *testing.T) {
 	x.status("w1:p2", "working")
 	x.mustOp("w1:p2", "send", SendArgs{Kind: store.KindDone, Body: "finished"}, nil)
 	x.status("w1:p2", "idle")
-	x.e.Tick()
+	x.advance(time.Second)
 	x.drain()
 	if x.task(dependent.ID).Status != store.TaskReady || x.h.promptCount("w1:p2") != 1 {
 		t.Fatal("completion automatically dispatched the dependent")

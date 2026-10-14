@@ -113,6 +113,7 @@ func Run(ctx context.Context, o Options) error {
 
 	// 3. Rebuild the watch set from the store, then follow herdr.
 	e.recomputeWatch()
+	e.SyncStatuses(ctx)
 	go e.subscribeLoop(ctx, hc, o.HerdrGoneAfter, cancel)
 
 	go func() {
