@@ -36,7 +36,7 @@ live: build
 	./scripts/live-dispatch.sh
 
 # Persistent registered Codex + Claude panes: dispatch, done, ask/reply, busy pane,
-# daemon restart, Codex sandbox probes (spends real agent turns).
+# daemon restart (spends real agent turns).
 live-team: build
 	./scripts/live-team.sh
 

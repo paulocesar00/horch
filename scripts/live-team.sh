@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Live check of how the team uses horch: two persistent, REGISTERED agent panes
-# (Codex gpt-6.1-sol in workspace-write, Claude haiku) in an isolated herdr session,
+# (Codex via `codex --profile apollo`, Claude haiku) in an isolated herdr session,
 # with this script as the coordinator identity. Spends real agent turns.
-#   0. Codex sandbox probes: daemon socket, git push, network
 #   1+2. dispatch -> `horch done` -> `check --wait`; second task to the same pane recalls the file
 #   3. mid-task `horch ask`; the reply comes from the coordinator identity
 #   4. dispatch to a busy pane is refused or queued, never typed over
@@ -18,7 +17,7 @@ SESSION=${HORCH_IT_SESSION:-horch-live-team}
 SOCK=$HOME/.config/herdr/sessions/$SESSION/herdr.sock
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/horch-live-team.XXXXXX")
 STATE=$HOME/.local/state/herdr/plugins/herdr-orch/sessions/$SESSION
-CODEX_CMD='codex -m gpt-6.1-sol -c model_reasoning_effort=low --sandbox workspace-write --ask-for-approval never'
+CODEX_CMD='codex --profile apollo'
 CLAUDE_CMD='claude --model haiku --permission-mode auto'
 
 unset HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SESSION HERDR_PLUGIN_STATE_DIR HORCH_AS
@@ -98,7 +97,7 @@ dispatch() { # dispatch <title> <spec> <pane> -> task id (dispatch result goes t
 tstatus() { horch task show --id "$1" --json | j .task.status; }
 
 step "setup: isolated herdr session '$SESSION'"
-for c in codex claude jq git curl; do command -v "$c" >/dev/null || abort "$c not installed"; done
+for c in codex claude jq git; do command -v "$c" >/dev/null || abort "$c not installed"; done
 horch daemon stop >/dev/null 2>&1 || true
 herdr session stop "$SESSION" >/dev/null 2>&1 || true
 herdr session delete "$SESSION" >/dev/null 2>&1 || true
@@ -123,49 +122,19 @@ horch check --json >/dev/null
 
 HOWTO='Report with the horch done command given below, with --body "<text>".'
 
-step "0. Codex workspace-write sandbox probes (socket, git push, network)"
-git init -q --bare "$WORK/remote.git"
-git -C "$WORK/codex" remote add origin "$WORK/remote.git"
-dispatch "sandbox probe" "Run each command and keep its output. 1) horch status  2) echo probe > p.txt && git add p.txt && git -c user.email=t@t -c user.name=t commit -m probe && git push origin HEAD:refs/heads/probe  3) curl -sI -m 15 https://github.com | head -1.  Then $HOWTO Body: three lines SOCKET:, PUSH:, CURL: with the exit code and first output line of each. If horch done itself fails, say so in your final answer with its exact error." "$CODEX" >/dev/null || abort "probe dispatch failed"
-CODEX_REPORTS=1
-if msg=$(wait_event done 150); then
-  ok "horch done from the workspace-write sandbox reached the daemon"
-  note "$(echo "$msg" | j .body | tr '\n' ' ' | head -c 300)"
-else
-  CODEX_REPORTS=0
-  bad "SANDBOX: horch done from codex workspace-write never reached the daemon"
-  note "pane tail: $(screen "$CODEX" | grep -i 'horch\|read-only\|denied' | tail -3 | tr '\n' ' ' | head -c 400)"
-fi
-if git --git-dir="$WORK/remote.git" rev-parse --verify -q refs/heads/probe >/dev/null; then
-  ok "git push to a local bare remote worked from the sandbox"
-else
-  bad "SANDBOX: git push to a local bare remote did not land"
-fi
-if [ "$CODEX_REPORTS" = 1 ] && grep -Eq "CURL:.*HTTP/[0-9.]+ [0-9]+" <<<"$(echo "$msg" | j .body)"; then
-  ok "network (curl -sI https://github.com) works from the sandbox"
-else
-  bad "SANDBOX: network from the sandbox not confirmed (curl result unreadable or blocked)"
-  note "pane tail: $(screen "$CODEX" | grep -i 'curl\|resolve\|HTTP/' | tail -3 | tr '\n' ' ' | head -c 300)"
-fi
-wait_idle "$CODEX"
-
 step "1+2. Codex: dispatch, done body, then the same pane recalls the file"
-if [ "$CODEX_REPORTS" = 1 ]; then
-  FILE=live-note-$RANDOM.txt
-  TA=$(dispatch "create file" "Create a file named $FILE in the current directory containing the text hello. Do not commit it. $HOWTO Put the file name in the body." "$CODEX") || abort "dispatch A failed"
-  if msg=$(wait_event done 300); then
-    body=$(echo "$msg" | j .body); note "done body: ${body:0:160}"
-    check "check --wait returned task A's completion naming $FILE" grep -q "$FILE" <<<"$body"
-    check "task A is completed" test "$(tstatus "$TA")" = completed
-  else bad "check --wait never returned task A's completion"; fi
-  TB=$(dispatch "recall" "What file did you create in the previous task? $HOWTO Name the file in the body." "$CODEX") || abort "dispatch B failed"
-  if msg=$(wait_event done 300); then
-    body=$(echo "$msg" | j .body); note "done body: ${body:0:160}"
-    check "task B names $FILE (conversation persisted)" grep -q "$FILE" <<<"$body"
-  else bad "no done message for task B"; fi
-else
-  bad "codex tasks A/B not run: codex cannot report from its sandbox (step 0)"
-fi
+FILE=live-note-$RANDOM.txt
+TA=$(dispatch "create file" "Create a file named $FILE in the current directory containing the text hello. Do not commit it. $HOWTO Put the file name in the body." "$CODEX") || abort "dispatch A failed"
+if msg=$(wait_event done 300); then
+  body=$(echo "$msg" | j .body); note "done body: ${body:0:160}"
+  check "check --wait returned task A's completion naming $FILE" grep -q "$FILE" <<<"$body"
+  check "task A is completed" test "$(tstatus "$TA")" = completed
+else bad "check --wait never returned task A's completion"; fi
+TB=$(dispatch "recall" "What file did you create in the previous task? $HOWTO Name the file in the body." "$CODEX") || abort "dispatch B failed"
+if msg=$(wait_event done 300); then
+  body=$(echo "$msg" | j .body); note "done body: ${body:0:160}"
+  check "task B names $FILE (conversation persisted)" grep -q "$FILE" <<<"$body"
+else bad "no done message for task B"; fi
 
 step "3. mid-task ask; the reply comes from the coordinator identity"
 TC=$(dispatch "ask first" "Before anything else run: horch ask --question \"Which color: red or blue?\" (it blocks until the coordinator replies). Then $HOWTO Put the color from the reply in the body." "$CLAUDE") || abort "dispatch C failed"
