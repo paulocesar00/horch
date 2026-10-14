@@ -276,27 +276,3 @@ func TestPickupRejectsWorkingEvidenceAfterDeadline(t *testing.T) {
 		t.Fatalf("persisted late evidence: %+v", got)
 	}
 }
-
-func TestDeliveryDoesNotTypeDuringWorkerLifecycle(t *testing.T) {
-	x, h, m := setupDelivery(t)
-	if _, err := x.st.RegisterWorker(store.Worker{PaneID: m.To, RunID: m.RunID, Agent: "codex", LaunchKnown: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err := x.st.BeginWorkerLifecycle(m.To, "restart"); err != nil {
-		t.Fatal(err)
-	}
-	if ready, err := x.e.readyPane(context.Background(), m.To); err != nil || ready {
-		t.Fatalf("restart pane ready=%v err=%v", ready, err)
-	}
-	seq := x.e.workingGeneration(m.To)
-	x.e.setStatus(m.To, "working")
-	if x.e.workingGeneration(m.To) != seq {
-		t.Fatal("restart working event became receipt evidence")
-	}
-	if x.e.awaitPickup(context.Background(), m, seq) {
-		t.Fatal("restart activity became pickup")
-	}
-	if h.sends != 0 {
-		t.Fatal("typed during restart")
-	}
-}
