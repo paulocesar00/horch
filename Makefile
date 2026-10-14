@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X github.com/ellingtonsp/herdr-orch/internal/daemon.Version=v$
 GOFLAGS := -trimpath
 OUT ?= bin
 
-.PHONY: build test race vet install-cli link integration clean
+.PHONY: build test race vet install-cli link integration live-team clean
 
 build:
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUT)/herdr-orch ./cmd/herdr-orch
@@ -29,6 +29,11 @@ link: build
 # End-to-end checks against an isolated herdr session.
 integration: build
 	./scripts/integration.sh
+
+# Persistent registered Codex + Claude panes: dispatch, done, ask/reply, busy pane,
+# daemon restart (spends real agent turns).
+live-team: build
+	./scripts/live-team.sh
 
 clean:
 	rm -rf bin dist
